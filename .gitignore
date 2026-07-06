@@ -1,3 +1,9 @@
+# Private Codex
+AGENTS.md
+.agents/
+.codex/
+docs/codex/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -29,9 +35,3 @@ id_ed25519
 *.sqlite-journal
 .ai-kb/
 .project-kb/
-
-# Private Codex
-AGENTS.md
-.agents/
-.codex/
-docs/codex/
