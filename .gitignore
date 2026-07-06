@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+
+# Local DB / runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-journal
+.ai-kb/
+.project-kb/
+
+# Private Codex
+AGENTS.md
+.agents/
+.codex/
+docs/codex/
