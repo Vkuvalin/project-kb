@@ -1,2 +1,5 @@
-def main() -> None:
-    print("Hello from project-kb!")
+"""Project KB package."""
+
+from project_kb.version import __version__
+
+__all__ = ["__version__"]
