@@ -4,10 +4,11 @@ from typing import Annotated
 
 import typer
 
-from project_kb.errors import NotImplementedFeatureError
+from project_kb.errors import NotImplementedFeatureError, ProjectKbError
 from project_kb.exit_codes import NOT_IMPLEMENTED, OK
 from project_kb.output.json import build_error_response, build_response, dumps
 from project_kb.output.text import format_capabilities, format_error
+from project_kb.registry import RegistryResult, RegistryService
 from project_kb.version import __version__
 
 app = typer.Typer(
@@ -21,6 +22,23 @@ def _emit_json(envelope: dict[str, object], *, exit_code: int = OK) -> None:
     typer.echo(dumps(envelope))
     if exit_code != OK:
         raise typer.Exit(exit_code)
+
+
+def _emit_error(error: ProjectKbError, *, command: str, json_output: bool) -> None:
+    envelope = build_error_response(error, command=command)
+    if json_output:
+        _emit_json(envelope, exit_code=error.exit_code)
+        return
+
+    typer.echo(format_error(error))
+    raise typer.Exit(error.exit_code)
+
+
+def _result_data(result: RegistryResult) -> dict[str, object]:
+    data = dict(result.data)
+    if result.project is not None:
+        data["project"] = result.project.to_dict()
+    return data
 
 
 @app.command("version")
@@ -70,11 +88,15 @@ def capabilities(
         "version": True,
         "status": False,
         "capabilities": True,
+        "register": True,
+        "projects": True,
+        "relink": True,
+        "unregister": True,
     }
     data = {
         "commands": commands,
         "storage": {
-            "registry": False,
+            "registry": True,
             "project_database": False,
         },
         "features": {
@@ -91,7 +113,7 @@ def capabilities(
         result="success",
         code="OK",
         command="capabilities",
-        message="Stage 1 skeleton capabilities are available.",
+        message="Stage 2 registry and storage capabilities are available.",
         data=data,
     )
 
@@ -100,6 +122,136 @@ def capabilities(
         return
 
     typer.echo(format_capabilities(commands))
+
+
+@app.command()
+def register(
+    name: Annotated[str, typer.Argument(help="Project CLI alias.")],
+    repo_path: Annotated[str, typer.Argument(help="Path inside the Git repository.")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print a JSON response envelope."),
+    ] = False,
+) -> None:
+    """Register a local Git project in the Project KB registry."""
+
+    try:
+        result = RegistryService().register(name, repo_path)
+    except ProjectKbError as error:
+        _emit_error(error, command="register", json_output=json_output)
+        return
+
+    envelope = build_response(
+        ok=True,
+        result="success",
+        code=result.code,
+        command="register",
+        message=result.message,
+        data=_result_data(result),
+    )
+    if json_output:
+        _emit_json(envelope)
+        return
+
+    typer.echo(result.message)
+
+
+@app.command("projects")
+def projects_command(
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print a JSON response envelope."),
+    ] = False,
+) -> None:
+    """List registered Project KB projects."""
+
+    try:
+        projects = RegistryService().list_projects()
+    except ProjectKbError as error:
+        _emit_error(error, command="projects", json_output=json_output)
+        return
+
+    envelope = build_response(
+        ok=True,
+        result="success",
+        code="OK",
+        command="projects",
+        message="Registered projects listed.",
+        data={"projects": [project.to_dict() for project in projects]},
+    )
+    if json_output:
+        _emit_json(envelope)
+        return
+
+    for project in projects:
+        typer.echo(f"{project.project_name}: {project.repo_root}")
+
+
+@app.command()
+def relink(
+    name: Annotated[str, typer.Argument(help="Registered project CLI alias.")],
+    new_repo_path: Annotated[str, typer.Argument(help="New path inside the Git repository.")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print a JSON response envelope."),
+    ] = False,
+) -> None:
+    """Relink a registered project to a moved Git repository root."""
+
+    try:
+        result = RegistryService().relink(name, new_repo_path)
+    except ProjectKbError as error:
+        _emit_error(error, command="relink", json_output=json_output)
+        return
+
+    envelope = build_response(
+        ok=True,
+        result="success",
+        code=result.code,
+        command="relink",
+        message=result.message,
+        data=_result_data(result),
+    )
+    if json_output:
+        _emit_json(envelope)
+        return
+
+    typer.echo(result.message)
+
+
+@app.command()
+def unregister(
+    name: Annotated[str, typer.Argument(help="Registered project CLI alias.")],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm removal from Project KB tracking."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print a JSON response envelope."),
+    ] = False,
+) -> None:
+    """Unregister a project and remove its Project KB storage directory."""
+
+    try:
+        result = RegistryService().unregister(name, yes=yes)
+    except ProjectKbError as error:
+        _emit_error(error, command="unregister", json_output=json_output)
+        return
+
+    envelope = build_response(
+        ok=True,
+        result="success",
+        code=result.code,
+        command="unregister",
+        message=result.message,
+        data=_result_data(result),
+    )
+    if json_output:
+        _emit_json(envelope)
+        return
+
+    typer.echo(result.message)
 
 
 def main() -> None:
