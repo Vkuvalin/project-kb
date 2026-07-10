@@ -15,6 +15,7 @@ def test_json_envelope_contains_required_top_level_fields() -> None:
     assert envelope["warnings"] == []
     assert envelope["error"] is None
     assert envelope["meta"]["tool"] == "project-kb"
+    assert envelope["meta"]["contract_version"] == 1
 
 
 def test_json_envelope_uses_structured_warning_objects() -> None:

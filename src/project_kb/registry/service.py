@@ -1,4 +1,4 @@
-"""Registry service for Stage 2 project registration commands."""
+"""Registry service for project registration and identity metadata."""
 
 import json
 import os
@@ -19,9 +19,19 @@ from project_kb.errors import (
     UnregisterRequiresYesError,
 )
 from project_kb.git_utils import resolve_git_root
-from project_kb.registry.db import open_registry
+from project_kb.registry.db import open_existing_registry, open_registry
 from project_kb.registry.models import ProjectRecord
-from project_kb.storage.home import create_project_storage, remove_project_storage, resolve_home
+from project_kb.resolver.repo_identity import (
+    RepositoryFingerprint,
+    build_repository_fingerprint,
+)
+from project_kb.storage.home import (
+    create_project_storage,
+    expected_project_storage_path,
+    remove_project_storage,
+    resolve_home,
+    storage_path_matches_expected,
+)
 
 PROJECT_NAME_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}\Z")
 
@@ -81,10 +91,70 @@ class RegistryService:
             ).fetchall()
         return [ProjectRecord.from_row(row) for row in rows]
 
+    def find_project_by_name(self, project_name: str) -> ProjectRecord | None:
+        """Look up a project without creating a missing registry."""
+
+        project_name_norm = normalize_project_name(project_name)
+        with open_existing_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
+            if conn is None:
+                return None
+            return self._get_project_by_name_norm(conn, project_name_norm)
+
+    def find_project_by_repo_root(self, repo_root: Path) -> ProjectRecord | None:
+        """Look up a normalized Git root without creating a missing registry."""
+
+        repo_root_norm = normalize_repo_root(repo_root)
+        with open_existing_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
+            if conn is None:
+                return None
+            return self._get_project_by_repo_norm(conn, repo_root_norm)
+
+    def initialize_repo_fingerprint(
+        self,
+        project_id: str,
+        fingerprint: RepositoryFingerprint,
+    ) -> tuple[ProjectRecord, bool]:
+        """Initialize nullable legacy fingerprint metadata and record one registry event."""
+
+        with open_existing_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
+            if conn is None:
+                raise RegistryOperationError(
+                    "Registry disappeared during fingerprint initialization."
+                )
+            project = self._require_project_by_id(conn, project_id)
+            if project.repo_fingerprint_json is not None:
+                return project, False
+
+            updated_at = utc_now()
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE projects
+                    SET repo_fingerprint_json = ?,
+                        updated_at = ?
+                    WHERE project_id = ?
+                      AND repo_fingerprint_json IS NULL
+                    """,
+                    (fingerprint.to_json(), updated_at, project_id),
+                )
+                initialized = cursor.rowcount == 1
+                if initialized:
+                    self._log_event(
+                        conn,
+                        project_id=project.project_id,
+                        project_name=project.project_name,
+                        event_type="repo_fingerprint_initialized",
+                        message="Repository fingerprint initialized.",
+                        details={"fingerprint_strength": fingerprint.fingerprint_strength},
+                    )
+
+            return self._require_project_by_id(conn, project_id), initialized
+
     def relink(self, project_name: str, new_repo_path: str | Path) -> RegistryResult:
         project_name_norm = normalize_project_name(project_name)
         repo_root = resolve_git_root(new_repo_path)
         repo_root_norm = normalize_repo_root(repo_root)
+        fingerprint = build_repository_fingerprint(repo_root)
 
         with open_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
             project = self._require_project_by_name_norm(conn, project_name, project_name_norm)
@@ -102,10 +172,17 @@ class RegistryService:
                     UPDATE projects
                     SET repo_root = ?,
                         repo_root_norm = ?,
+                        repo_fingerprint_json = ?,
                         updated_at = ?
                     WHERE project_id = ?
                     """,
-                    (str(repo_root), repo_root_norm, updated_at, project.project_id),
+                    (
+                        str(repo_root),
+                        repo_root_norm,
+                        fingerprint.to_json(),
+                        updated_at,
+                        project.project_id,
+                    ),
                 )
                 self._log_event(
                     conn,
@@ -113,7 +190,10 @@ class RegistryService:
                     project_name=project.project_name,
                     event_type="relink",
                     message="Project repository root relinked.",
-                    details={"repo_root": str(repo_root)},
+                    details={
+                        "repo_root": str(repo_root),
+                        "fingerprint_strength": fingerprint.fingerprint_strength,
+                    },
                 )
 
             updated_project = self._require_project_by_id(conn, project.project_id)
@@ -130,6 +210,21 @@ class RegistryService:
 
         with open_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
             project = self._require_project_by_name_norm(conn, project_name, project_name_norm)
+            if not storage_path_matches_expected(
+                Path(project.storage_path),
+                home=self.home,
+                project_id=project.project_id,
+            ):
+                raise RegistryOperationError(
+                    "Refusing to unregister a project with an unexpected storage path.",
+                    details={
+                        "project_id": project.project_id,
+                        "storage_path": project.storage_path,
+                        "expected_storage_path": str(
+                            expected_project_storage_path(self.home, project.project_id)
+                        ),
+                    },
+                )
             with conn:
                 removed_paths = remove_project_storage(Path(project.storage_path), home=self.home)
                 conn.execute("DELETE FROM projects WHERE project_id = ?", (project.project_id,))
@@ -167,7 +262,20 @@ class RegistryService:
         repo_root_norm: str,
     ) -> RegistryResult:
         project_id = new_id()
-        storage_path = self.home / "projects" / project_id
+        storage_path = expected_project_storage_path(self.home, project_id)
+        if not storage_path_matches_expected(
+            storage_path,
+            home=self.home,
+            project_id=project_id,
+        ):
+            raise RegistryOperationError(
+                "Refusing to create project storage outside the Project KB home.",
+                details={
+                    "project_id": project_id,
+                    "storage_path": str(storage_path),
+                },
+            )
+        fingerprint = build_repository_fingerprint(repo_root)
         storage_paths = create_project_storage(storage_path)
         created_at = utc_now()
 
@@ -185,9 +293,10 @@ class RegistryService:
                     updated_at,
                     last_status,
                     last_indexed_at,
-                    last_git_commit
+                    last_git_commit,
+                    repo_fingerprint_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 """,
                 (
                     project_id,
@@ -199,6 +308,7 @@ class RegistryService:
                     created_at,
                     created_at,
                     "REGISTERED",
+                    fingerprint.to_json(),
                 ),
             )
             self._log_event(
@@ -215,7 +325,11 @@ class RegistryService:
                 project_name=project_name,
                 event_type="register",
                 message="Project registered.",
-                details={"repo_root": str(repo_root), "storage_path": str(storage_path)},
+                details={
+                    "repo_root": str(repo_root),
+                    "storage_path": str(storage_path),
+                    "fingerprint_strength": fingerprint.fingerprint_strength,
+                },
             )
 
         project = self._require_project_by_id(conn, project_id)
@@ -230,19 +344,55 @@ class RegistryService:
         conn: sqlite3.Connection,
         project: ProjectRecord,
     ) -> RegistryResult:
+        if not storage_path_matches_expected(
+            Path(project.storage_path),
+            home=self.home,
+            project_id=project.project_id,
+        ):
+            raise RegistryOperationError(
+                "Refusing to refresh project storage at an unexpected path.",
+                details={
+                    "project_id": project.project_id,
+                    "storage_path": project.storage_path,
+                    "expected_storage_path": str(
+                        expected_project_storage_path(self.home, project.project_id)
+                    ),
+                },
+            )
+
         create_project_storage(Path(project.storage_path))
         updated_at = utc_now()
+        fingerprint = (
+            build_repository_fingerprint(Path(project.repo_root))
+            if project.repo_fingerprint_json is None
+            else None
+        )
 
         with conn:
             conn.execute(
                 """
                 UPDATE projects
                 SET updated_at = ?,
-                    last_status = ?
+                    last_status = ?,
+                    repo_fingerprint_json = COALESCE(repo_fingerprint_json, ?)
                 WHERE project_id = ?
                 """,
-                (updated_at, "REGISTERED", project.project_id),
+                (
+                    updated_at,
+                    "REGISTERED",
+                    fingerprint.to_json() if fingerprint else None,
+                    project.project_id,
+                ),
             )
+            if fingerprint is not None:
+                self._log_event(
+                    conn,
+                    project_id=project.project_id,
+                    project_name=project.project_name,
+                    event_type="repo_fingerprint_initialized",
+                    message="Repository fingerprint initialized.",
+                    details={"fingerprint_strength": fingerprint.fingerprint_strength},
+                )
             self._log_event(
                 conn,
                 project_id=project.project_id,

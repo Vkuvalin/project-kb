@@ -183,6 +183,28 @@ class RegistryOperationError(ProjectKbError):
         )
 
 
+class ProjectStatusError(ProjectKbError):
+    """Structured problem associated with a classified status outcome."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        exit_code: int,
+        recommended_action: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            exit_code=exit_code,
+            recommended_action=recommended_action,
+            retryable=False,
+            details=details,
+        )
+
+
 class UnregisterRequiresYesError(ProjectKbError):
     """Raised when unregister is requested without explicit confirmation."""
 

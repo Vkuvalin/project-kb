@@ -1,4 +1,4 @@
-"""Small Git helpers for Stage 2 project identity."""
+"""Small Git helpers shared by registration and status resolution."""
 
 import subprocess
 from pathlib import Path

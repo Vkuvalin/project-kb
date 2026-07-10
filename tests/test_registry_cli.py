@@ -11,6 +11,7 @@ from project_kb.exit_codes import (
     OK,
     REGISTRY_ERROR,
     REPO_PATH_ERROR,
+    SNAPSHOT_UNAVAILABLE,
     USAGE_ERROR,
 )
 
@@ -47,7 +48,7 @@ def test_registry_schema_tables_and_meta_are_initialized(isolated_kb_home: Path)
         ).fetchone()
 
     assert {"projects", "registry_events", "meta"}.issubset(tables)
-    assert meta["schema_version"] == "1"
+    assert meta["schema_version"] == "2"
     assert "created_at" in meta
     assert "tool_version" in meta
     assert event is not None
@@ -83,6 +84,12 @@ def test_register_creates_project_record_and_storage_directories(
     assert (Path(project["storage_path"]) / "exports").is_dir()
     assert (Path(project["storage_path"]) / "runs").is_dir()
     assert fetch_project_count(isolated_kb_home / "registry.sqlite") == 1
+    with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
+        fingerprint_json = conn.execute(
+            "SELECT repo_fingerprint_json FROM projects WHERE project_id = ?",
+            (project["project_id"],),
+        ).fetchone()[0]
+    assert fingerprint_json is not None
 
 
 def test_register_same_name_and_repo_is_idempotent(
@@ -102,6 +109,45 @@ def test_register_same_name_and_repo_is_idempotent(
         == first_payload["data"]["project"]["project_id"]
     )
     assert fetch_project_count(isolated_kb_home / "registry.sqlite") == 1
+
+
+def test_register_refresh_recovers_missing_expected_storage(temp_git_repo: Path) -> None:
+    first = runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"])
+    project = parse_json_output(first.output)["data"]["project"]
+    storage_path = Path(project["storage_path"])
+    (storage_path / "exports").rmdir()
+    (storage_path / "runs").rmdir()
+    storage_path.rmdir()
+
+    result = runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"])
+
+    payload = parse_json_output(result.output)
+    assert result.exit_code == OK
+    assert payload["code"] == "PROJECT_ALREADY_REGISTERED_REFRESHED"
+    assert (storage_path / "exports").is_dir()
+    assert (storage_path / "runs").is_dir()
+
+
+def test_register_refresh_refuses_mismatched_storage_path(
+    isolated_kb_home: Path,
+    temp_git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    first = runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"])
+    project = parse_json_output(first.output)["data"]["project"]
+    outside_path = tmp_path / "outside-storage"
+    with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
+        conn.execute(
+            "UPDATE projects SET storage_path = ? WHERE project_id = ?",
+            (str(outside_path), project["project_id"]),
+        )
+
+    result = runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"])
+
+    payload = parse_json_output(result.output)
+    assert result.exit_code == REGISTRY_ERROR
+    assert payload["code"] == "REGISTRY_ERROR"
+    assert not outside_path.exists()
 
 
 def test_register_same_name_with_different_repo_blocks(
@@ -159,6 +205,11 @@ def test_relink_updates_repo_root_and_keeps_identity(
     assert relinked["storage_path"] == registered["storage_path"]
     assert Path(relinked["repo_root"]).resolve() == second_temp_git_repo.resolve()
 
+    status_result = runner.invoke(app, ["status", "repo-one", "--json"])
+    status_payload = parse_json_output(status_result.output)
+    assert status_result.exit_code == SNAPSHOT_UNAVAILABLE
+    assert status_payload["data"]["repo_check"]["fingerprint_status"] == "matched"
+
 
 def test_relink_to_repo_registered_by_another_project_blocks(
     temp_git_repo: Path,
@@ -206,6 +257,59 @@ def test_unregister_with_yes_removes_registry_record_and_storage(
     assert not storage_path.exists()
     assert temp_git_repo.exists()
     assert fetch_project_count(isolated_kb_home / "registry.sqlite") == 0
+
+
+def test_unregister_refuses_mismatched_storage_path(
+    isolated_kb_home: Path,
+    temp_git_repo: Path,
+    second_temp_git_repo: Path,
+) -> None:
+    first = parse_json_output(
+        runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"]).output
+    )["data"]["project"]
+    second = parse_json_output(
+        runner.invoke(app, ["register", "repo-two", str(second_temp_git_repo), "--json"]).output
+    )["data"]["project"]
+    with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
+        conn.execute(
+            "UPDATE projects SET storage_path = ? WHERE project_id = ?",
+            (second["storage_path"], first["project_id"]),
+        )
+
+    result = runner.invoke(app, ["unregister", "repo-one", "--yes", "--json"])
+
+    payload = parse_json_output(result.output)
+    assert result.exit_code == REGISTRY_ERROR
+    assert payload["code"] == "REGISTRY_ERROR"
+    assert Path(second["storage_path"]).is_dir()
+    assert fetch_project_count(isolated_kb_home / "registry.sqlite") == 2
+
+
+def test_unregister_rejects_path_like_corrupt_project_identifier(
+    isolated_kb_home: Path,
+    temp_git_repo: Path,
+    second_temp_git_repo: Path,
+) -> None:
+    first = parse_json_output(
+        runner.invoke(app, ["register", "repo-one", str(temp_git_repo), "--json"]).output
+    )["data"]["project"]
+    second = parse_json_output(
+        runner.invoke(app, ["register", "repo-two", str(second_temp_git_repo), "--json"]).output
+    )["data"]["project"]
+    malicious_id = f"segment/../{second['project_id']}"
+    with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
+        conn.execute(
+            "UPDATE projects SET project_id = ?, storage_path = ? WHERE project_id = ?",
+            (malicious_id, second["storage_path"], first["project_id"]),
+        )
+
+    result = runner.invoke(app, ["unregister", "repo-one", "--yes", "--json"])
+
+    payload = parse_json_output(result.output)
+    assert result.exit_code == REGISTRY_ERROR
+    assert payload["code"] == "REGISTRY_ERROR"
+    assert Path(second["storage_path"]).is_dir()
+    assert fetch_project_count(isolated_kb_home / "registry.sqlite") == 2
 
 
 def test_invalid_project_name_blocks(temp_git_repo: Path) -> None:

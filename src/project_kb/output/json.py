@@ -25,10 +25,11 @@ class WarningObject(TypedDict):
     details: NotRequired[dict[str, Any]]
 
 
-def default_meta() -> dict[str, str]:
+def default_meta() -> dict[str, str | int]:
     return {
         "tool": "project-kb",
         "version": __version__,
+        "contract_version": 1,
     }
 
 

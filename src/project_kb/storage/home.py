@@ -8,7 +8,7 @@ from project_kb.errors import RegistryOperationError
 
 
 def resolve_home() -> Path:
-    """Resolve the Project KB home using the Stage 2 policy."""
+    """Resolve the Project KB home using the current local-storage policy."""
 
     configured_home = os.environ.get("PROJECT_KB_HOME")
     if configured_home:
@@ -21,13 +21,40 @@ def resolve_home() -> Path:
     return (Path.home() / ".project-kb").resolve()
 
 
+def expected_project_storage_path(home: Path, project_id: str) -> Path:
+    """Return the one allowed storage directory for a registered project."""
+
+    return Path(os.path.abspath(home / "projects" / project_id))
+
+
+def storage_path_matches_expected(storage_path: Path, *, home: Path, project_id: str) -> bool:
+    """Check exact storage ownership without creating or repairing any path."""
+
+    resolved_home = home.expanduser().resolve(strict=False)
+    projects_path = Path(os.path.abspath(resolved_home / "projects"))
+    resolved_projects = projects_path.resolve(strict=False)
+    if resolved_projects != projects_path or not resolved_projects.is_relative_to(resolved_home):
+        return False
+
+    expected = expected_project_storage_path(resolved_home, project_id)
+    actual = Path(os.path.abspath(storage_path.expanduser()))
+    if actual != expected:
+        return False
+
+    resolved_actual = actual.resolve(strict=False)
+    return resolved_actual == expected and resolved_actual.is_relative_to(resolved_projects)
+
+
 def create_project_storage(storage_path: Path) -> dict[str, str]:
-    """Create the Stage 2 per-project storage directory layout."""
+    """Create the per-project storage directory layout."""
 
     try:
+        _reject_redirected_storage_path(storage_path)
         storage_path.mkdir(parents=True, exist_ok=True)
         exports_path = storage_path / "exports"
         runs_path = storage_path / "runs"
+        _reject_redirected_storage_path(exports_path)
+        _reject_redirected_storage_path(runs_path)
         exports_path.mkdir(exist_ok=True)
         runs_path.mkdir(exist_ok=True)
     except OSError as exc:
@@ -41,6 +68,21 @@ def create_project_storage(storage_path: Path) -> dict[str, str]:
         "exports_path": str(exports_path),
         "runs_path": str(runs_path),
     }
+
+
+def _reject_redirected_storage_path(path: Path) -> None:
+    try:
+        redirected = path.is_symlink() or path.is_junction()
+    except OSError as exc:
+        raise RegistryOperationError(
+            "Project storage path could not be inspected safely.",
+            details={"storage_path": str(path), "os_error": str(exc)},
+        ) from exc
+    if redirected:
+        raise RegistryOperationError(
+            "Refusing to create or refresh redirected Project KB storage.",
+            details={"storage_path": str(path)},
+        )
 
 
 def remove_project_storage(storage_path: Path, *, home: Path) -> dict[str, object]:

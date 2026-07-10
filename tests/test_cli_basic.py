@@ -3,7 +3,7 @@ import json
 from typer.testing import CliRunner
 
 from project_kb.cli.app import app
-from project_kb.exit_codes import NOT_IMPLEMENTED, OK
+from project_kb.exit_codes import OK, PROJECT_NOT_REGISTERED
 from project_kb.version import __version__
 
 runner = CliRunner()
@@ -33,16 +33,17 @@ def test_version_works() -> None:
 
 
 def test_status_json_returns_only_valid_json() -> None:
-    result = runner.invoke(app, ["status", "--json"])
+    result = runner.invoke(app, ["status", "missing", "--json"])
 
-    assert result.exit_code == NOT_IMPLEMENTED
+    assert result.exit_code == PROJECT_NOT_REGISTERED
     payload = parse_json_output(result.output)
     assert payload["ok"] is False
     assert payload["result"] == "blocked"
-    assert payload["code"] == "NOT_IMPLEMENTED"
+    assert payload["code"] == "PROJECT_NOT_REGISTERED"
     assert payload["command"] == "status"
-    assert payload["data"] == {"project_state": "NO_REGISTRY"}
-    assert payload["error"]["type"] == "NotImplementedFeatureError"
+    assert payload["data"]["project_state"] == "UNREGISTERED"
+    assert payload["error"]["type"] == "ProjectStatusError"
+    assert payload["meta"]["contract_version"] == 1
 
 
 def test_capabilities_json_returns_only_valid_json() -> None:
@@ -55,4 +56,4 @@ def test_capabilities_json_returns_only_valid_json() -> None:
     assert payload["code"] == "OK"
     assert payload["command"] == "capabilities"
     assert payload["data"]["commands"]["version"] is True
-    assert payload["data"]["commands"]["status"] is False
+    assert payload["data"]["commands"]["status"] is True

@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -30,11 +31,51 @@ def second_temp_git_repo(tmp_path: Path) -> Path:
 
 def _init_git_repo(repo_path: Path) -> Path:
     repo_path.mkdir()
+    git_env = os.environ.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "Project KB Tests",
+            "GIT_AUTHOR_EMAIL": "project-kb-tests@example.invalid",
+            "GIT_COMMITTER_NAME": "Project KB Tests",
+            "GIT_COMMITTER_EMAIL": "project-kb-tests@example.invalid",
+        }
+    )
     subprocess.run(
         ["git", "init"],
         cwd=repo_path,
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
+    )
+    (repo_path / "README.md").write_text(f"# {repo_path.name}\n", encoding="utf-8")
+    hooks_path = repo_path / ".git" / "disabled-hooks"
+    hooks_path.mkdir()
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            f"core.hooksPath={hooks_path}",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Initial test commit",
+        ],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=git_env,
     )
     return repo_path

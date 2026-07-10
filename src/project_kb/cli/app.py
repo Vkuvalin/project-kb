@@ -4,11 +4,12 @@ from typing import Annotated
 
 import typer
 
-from project_kb.errors import NotImplementedFeatureError, ProjectKbError
-from project_kb.exit_codes import NOT_IMPLEMENTED, OK
+from project_kb.errors import ProjectKbError
+from project_kb.exit_codes import OK
 from project_kb.output.json import build_error_response, build_response, dumps
 from project_kb.output.text import format_capabilities, format_error
 from project_kb.registry import RegistryResult, RegistryService
+from project_kb.resolver.project import ProjectStatusService
 from project_kb.version import __version__
 
 app = typer.Typer(
@@ -50,6 +51,10 @@ def version_command() -> None:
 
 @app.command()
 def status(
+    project_name: Annotated[
+        str | None,
+        typer.Argument(help="Registered project name. Omit to resolve the current directory."),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print a JSON response envelope."),
@@ -57,22 +62,26 @@ def status(
 ) -> None:
     """Show current Project KB status."""
 
-    error = NotImplementedFeatureError()
-    data = {"project_state": "NO_REGISTRY"}
-    envelope = build_error_response(
-        error,
+    outcome = ProjectStatusService().status(project_name)
+    envelope = build_response(
+        ok=outcome.ok,
+        result=outcome.result,
+        code=outcome.code,
         command="status",
-        message="Project resolver is not implemented yet.",
-        data=data,
+        message=outcome.message,
+        data=outcome.data(),
+        error=outcome.error,
     )
 
     if json_output:
-        _emit_json(envelope, exit_code=NOT_IMPLEMENTED)
+        _emit_json(envelope, exit_code=outcome.exit_code)
         return
 
-    typer.echo("Project resolver is not implemented yet.")
-    typer.echo(format_error(error))
-    raise typer.Exit(NOT_IMPLEMENTED)
+    typer.echo(f"{outcome.project_state.value}: {outcome.message}")
+    if outcome.recommended_action.command:
+        typer.echo(f"Recommended: {outcome.recommended_action.command}")
+    if outcome.exit_code != OK:
+        raise typer.Exit(outcome.exit_code)
 
 
 @app.command()
@@ -86,7 +95,7 @@ def capabilities(
 
     commands = {
         "version": True,
-        "status": False,
+        "status": True,
         "capabilities": True,
         "register": True,
         "projects": True,
@@ -100,7 +109,7 @@ def capabilities(
             "project_database": False,
         },
         "features": {
-            "project_resolver": False,
+            "project_resolver": True,
             "git_scanning": False,
             "snapshot_indexing": False,
             "search": False,
@@ -113,7 +122,7 @@ def capabilities(
         result="success",
         code="OK",
         command="capabilities",
-        message="Stage 2 registry and storage capabilities are available.",
+        message="Stage 3 project resolver and registry capabilities are available.",
         data=data,
     )
 
