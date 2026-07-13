@@ -1,5 +1,6 @@
 """Project status resolution orchestration."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from project_kb.errors import (
     ProjectKbError,
     ProjectStatusError,
     RegistryOperationError,
+    SnapshotQueryError,
 )
 from project_kb.exit_codes import GIT_REPO_ERROR
 from project_kb.gating import GateContext, GateRequirement, evaluate_gate
@@ -28,6 +30,7 @@ from project_kb.resolver.state import (
     recommended_action_for,
 )
 from project_kb.resolver.storage_check import check_project_storage
+from project_kb.snapshot.database import validate_snapshot
 from project_kb.storage.home import resolve_home
 
 
@@ -203,7 +206,54 @@ class ProjectStatusService:
                 storage_check=storage_check,
             )
 
-        state = ProjectState.REGISTERED_NO_SNAPSHOT
+        snapshot_path = Path(project.storage_path) / "kb.sqlite"
+        if not snapshot_path.exists():
+            state = ProjectState.REGISTERED_NO_SNAPSHOT
+            snapshot_check = SnapshotCheck.absent()
+            snapshot_present = False
+        else:
+            try:
+                snapshot_meta = validate_snapshot(snapshot_path, project_id=project.project_id)
+            except SnapshotQueryError as error:
+                state = (
+                    ProjectState.SNAPSHOT_REBUILD_REQUIRED
+                    if error.code == "SNAPSHOT_REBUILD_REQUIRED"
+                    else ProjectState.SNAPSHOT_STORAGE_ERROR
+                )
+                return self._problem(
+                    state,
+                    resolution=resolution,
+                    project=project,
+                    repo_check=repo_evaluation.check,
+                    storage_check=storage_check,
+                    error_details=error.details,
+                )
+            registry_reconciled = (
+                project.last_status == "INDEX_SUCCEEDED"
+                and project.last_indexed_at == snapshot_meta["created_at"]
+            )
+            if registry_reconciled:
+                state = ProjectState.SNAPSHOT_PRESENT_UNVERIFIED
+            elif _is_newer(snapshot_meta["created_at"], project.updated_at):
+                state = ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING
+            elif (project.last_status or "").startswith("INDEX_FAILED:"):
+                state = ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE
+            else:
+                state = ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING
+            snapshot_check = SnapshotCheck(
+                status="valid_when_published_currentness_unverified",
+                snapshot_id=snapshot_meta["snapshot_id"],
+                indexed_at=snapshot_meta["created_at"],
+                git_commit_at_index=snapshot_meta["git_head"],
+                current_git_commit=None,
+                is_current=False,
+                reason=(
+                    "present_working_tree_not_compared"
+                    if state is ProjectState.SNAPSHOT_PRESENT_UNVERIFIED
+                    else "snapshot_available_with_registry_outcome_warning"
+                ),
+            )
+            snapshot_present = True
         policy = STATE_POLICIES[state]
         action = recommended_action_for(
             state,
@@ -221,13 +271,13 @@ class ProjectStatusService:
             project=project,
             repo_check=repo_evaluation.check,
             storage_check=storage_check,
-            snapshot_check=SnapshotCheck.absent(),
+            snapshot_check=snapshot_check,
             availability=_availability(
                 registry_available=True,
                 project_resolved=True,
                 repo_valid=True,
                 storage_valid=True,
-                snapshot_present=False,
+                snapshot_present=snapshot_present,
                 snapshot_current=False,
             ),
             requires_user_action=policy.requires_user_action,
@@ -347,3 +397,12 @@ def _availability(
         can_generate_exports=evaluate_gate(context, current_snapshot_requirements).allowed,
         can_generate_context=evaluate_gate(context, current_snapshot_requirements).allowed,
     )
+
+
+def _is_newer(left: str, right: str) -> bool:
+    try:
+        return datetime.fromisoformat(left.replace("Z", "+00:00")) > datetime.fromisoformat(
+            right.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False

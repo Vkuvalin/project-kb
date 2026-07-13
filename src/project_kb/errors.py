@@ -10,6 +10,7 @@ from project_kb.exit_codes import (
     PROJECT_NOT_REGISTERED,
     REGISTRY_ERROR,
     REPO_PATH_ERROR,
+    SNAPSHOT_UNAVAILABLE,
     USAGE_ERROR,
 )
 
@@ -216,4 +217,45 @@ class UnregisterRequiresYesError(ProjectKbError):
             recommended_action="Re-run with --yes to remove this project from Project KB tracking.",
             retryable=False,
             details={"project_name": project_name},
+        )
+
+
+class IndexingError(ProjectKbError):
+    """Raised when a structural snapshot cannot be built or published safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INDEX_BUILD_FAILED",
+        retryable: bool = True,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            exit_code=SNAPSHOT_UNAVAILABLE,
+            recommended_action="Retry indexing after the repository and storage are stable.",
+            retryable=retryable,
+            details=details,
+        )
+
+
+class SnapshotQueryError(ProjectKbError):
+    """Raised when a structural snapshot is absent, corrupt, or unsafe to read."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "SNAPSHOT_UNAVAILABLE",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            exit_code=SNAPSHOT_UNAVAILABLE,
+            recommended_action="Run pkb index for the project and retry the query.",
+            retryable=False,
+            details=details,
         )

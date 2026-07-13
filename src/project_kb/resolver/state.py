@@ -19,6 +19,11 @@ from project_kb.gating.models import RecommendedAction
 
 class ProjectState(StrEnum):
     REGISTERED_NO_SNAPSHOT = "REGISTERED_NO_SNAPSHOT"
+    SNAPSHOT_PRESENT_UNVERIFIED = "SNAPSHOT_PRESENT_UNVERIFIED"
+    SNAPSHOT_PRESENT_REGISTRY_WARNING = "SNAPSHOT_PRESENT_REGISTRY_WARNING"
+    LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE = "LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE"
+    SNAPSHOT_REBUILD_REQUIRED = "SNAPSHOT_REBUILD_REQUIRED"
+    SNAPSHOT_STORAGE_ERROR = "SNAPSHOT_STORAGE_ERROR"
     OK = "OK"
     UNREGISTERED = "UNREGISTERED"
     BROKEN_PATH = "BROKEN_PATH"
@@ -48,6 +53,54 @@ STATE_POLICIES = {
         ok=False,
         result="blocked",
         has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_PRESENT_UNVERIFIED: StatePolicy(
+        code="SNAPSHOT_PRESENT_UNVERIFIED",
+        message=(
+            "A valid published snapshot is available; present working-tree "
+            "currentness is unverified."
+        ),
+        exit_code=OK,
+        ok=True,
+        result="success",
+        has_error=False,
+        requires_user_action=False,
+    ),
+    ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE: StatePolicy(
+        code="LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE",
+        message="The last index attempt failed; the previous valid snapshot remains available.",
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING: StatePolicy(
+        code="SNAPSHOT_PRESENT_REGISTRY_WARNING",
+        message="A newer published snapshot is available, but registry outcome metadata is stale.",
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_REBUILD_REQUIRED: StatePolicy(
+        code="SNAPSHOT_REBUILD_REQUIRED",
+        message="The snapshot is readable but incompatible with current structural semantics.",
+        exit_code=SNAPSHOT_UNAVAILABLE,
+        ok=False,
+        result="blocked",
+        has_error=True,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_STORAGE_ERROR: StatePolicy(
+        code="SNAPSHOT_STORAGE_ERROR",
+        message="The project snapshot exists but could not be validated safely.",
+        exit_code=SNAPSHOT_UNAVAILABLE,
+        ok=False,
+        result="blocked",
+        has_error=True,
         requires_user_action=True,
     ),
     ProjectState.OK: StatePolicy(
@@ -159,6 +212,41 @@ def recommended_action_for(
             available=False,
             requires_user_approval=True,
             reason="snapshot_not_created",
+        ),
+        ProjectState.SNAPSHOT_PRESENT_UNVERIFIED: RecommendedAction(
+            code="NONE",
+            command=None,
+            available=True,
+            requires_user_approval=False,
+            reason="snapshot_valid_when_published_currentness_unverified",
+        ),
+        ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE: RecommendedAction(
+            code="RETRY_INDEX",
+            command=f"pkb index {name} --json",
+            available=True,
+            requires_user_approval=False,
+            reason="last_index_failed_previous_snapshot_available",
+        ),
+        ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING: RecommendedAction(
+            code="RECONCILE_REGISTRY_OR_REINDEX",
+            command=f"pkb index {name} --full --json",
+            available=True,
+            requires_user_approval=False,
+            reason="published_snapshot_newer_than_registry_outcome",
+        ),
+        ProjectState.SNAPSHOT_REBUILD_REQUIRED: RecommendedAction(
+            code="REBUILD_INDEX",
+            command=f"pkb index {name} --full --json",
+            available=True,
+            requires_user_approval=False,
+            reason="snapshot_semantics_incompatible",
+        ),
+        ProjectState.SNAPSHOT_STORAGE_ERROR: RecommendedAction(
+            code="REBUILD_INDEX",
+            command=f"pkb index {name} --full --json",
+            available=True,
+            requires_user_approval=False,
+            reason="snapshot_storage_invalid",
         ),
         ProjectState.OK: RecommendedAction(
             code="NONE",

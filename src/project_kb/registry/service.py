@@ -150,6 +150,44 @@ class RegistryService:
 
             return self._require_project_by_id(conn, project_id), initialized
 
+    def record_index_outcome(
+        self,
+        project_id: str,
+        *,
+        status: str,
+        indexed_at: str | None = None,
+        git_commit: str | None = None,
+        failure_code: str | None = None,
+    ) -> ProjectRecord:
+        """Record the latest index outcome without changing registry schema contracts."""
+
+        with open_existing_registry(home=self.home, now=utc_now, event_id=new_id) as conn:
+            if conn is None:
+                raise RegistryOperationError("Registry disappeared while recording index outcome.")
+            project = self._require_project_by_id(conn, project_id)
+            updated_at = precise_utc_now()
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET last_status = ?,
+                        last_indexed_at = COALESCE(?, last_indexed_at),
+                        last_git_commit = COALESCE(?, last_git_commit),
+                        updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (status, indexed_at, git_commit, updated_at, project_id),
+                )
+                self._log_event(
+                    conn,
+                    project_id=project.project_id,
+                    project_name=project.project_name,
+                    event_type="index_outcome",
+                    message="Structural index outcome recorded.",
+                    details={"status": status, "failure_code": failure_code},
+                )
+            return self._require_project_by_id(conn, project_id)
+
     def relink(self, project_name: str, new_repo_path: str | Path) -> RegistryResult:
         project_name_norm = normalize_project_name(project_name)
         repo_root = resolve_git_root(new_repo_path)
@@ -505,6 +543,10 @@ def normalize_repo_root(repo_root: Path) -> str:
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def precise_utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def new_id() -> str:
