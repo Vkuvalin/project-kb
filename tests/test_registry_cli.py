@@ -48,7 +48,7 @@ def test_registry_schema_tables_and_meta_are_initialized(isolated_kb_home: Path)
         ).fetchone()
 
     assert {"projects", "registry_events", "meta"}.issubset(tables)
-    assert meta["schema_version"] == "2"
+    assert meta["schema_version"] == "3"
     assert "created_at" in meta
     assert "tool_version" in meta
     assert event is not None

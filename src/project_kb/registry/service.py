@@ -158,6 +158,7 @@ class RegistryService:
         indexed_at: str | None = None,
         git_commit: str | None = None,
         failure_code: str | None = None,
+        binding_generation: str | None = None,
     ) -> ProjectRecord:
         """Record the latest index outcome without changing registry schema contracts."""
 
@@ -165,6 +166,15 @@ class RegistryService:
             if conn is None:
                 raise RegistryOperationError("Registry disappeared while recording index outcome.")
             project = self._require_project_by_id(conn, project_id)
+            if status == "INDEX_SUCCEEDED" and (
+                binding_generation is None or binding_generation != project.repo_binding_generation
+            ):
+                raise RegistryOperationError(
+                    "Repository binding changed before the index outcome could be recorded."
+                )
+            snapshot_binding_generation = (
+                binding_generation if status == "INDEX_SUCCEEDED" else None
+            )
             updated_at = precise_utc_now()
             with conn:
                 conn.execute(
@@ -173,10 +183,20 @@ class RegistryService:
                     SET last_status = ?,
                         last_indexed_at = COALESCE(?, last_indexed_at),
                         last_git_commit = COALESCE(?, last_git_commit),
+                        snapshot_binding_generation = COALESCE(
+                            ?, snapshot_binding_generation
+                        ),
                         updated_at = ?
                     WHERE project_id = ?
                     """,
-                    (status, indexed_at, git_commit, updated_at, project_id),
+                    (
+                        status,
+                        indexed_at,
+                        git_commit,
+                        snapshot_binding_generation,
+                        updated_at,
+                        project_id,
+                    ),
                 )
                 self._log_event(
                     conn,
@@ -204,6 +224,13 @@ class RegistryService:
                 )
 
             updated_at = utc_now()
+            fingerprint_json = fingerprint.to_json()
+            binding_changed = (
+                project.repo_root_norm != repo_root_norm
+                or project.repo_fingerprint_json != fingerprint_json
+            )
+            binding_generation = new_id()
+            last_status = "RELINKED_REINDEX_REQUIRED"
             with conn:
                 conn.execute(
                     """
@@ -211,13 +238,17 @@ class RegistryService:
                     SET repo_root = ?,
                         repo_root_norm = ?,
                         repo_fingerprint_json = ?,
+                        repo_binding_generation = ?,
+                        last_status = ?,
                         updated_at = ?
                     WHERE project_id = ?
                     """,
                     (
                         str(repo_root),
                         repo_root_norm,
-                        fingerprint.to_json(),
+                        fingerprint_json,
+                        binding_generation,
+                        last_status,
                         updated_at,
                         project.project_id,
                     ),
@@ -231,6 +262,8 @@ class RegistryService:
                     details={
                         "repo_root": str(repo_root),
                         "fingerprint_strength": fingerprint.fingerprint_strength,
+                        "identity_changed": binding_changed,
+                        "rebuild_required": True,
                     },
                 )
 
@@ -239,6 +272,7 @@ class RegistryService:
             code="PROJECT_RELINKED",
             message="Project repository root relinked.",
             project=updated_project,
+            data={"rebuild_required": True, "identity_changed": binding_changed},
         )
 
     def unregister(self, project_name: str, *, yes: bool) -> RegistryResult:
@@ -300,6 +334,7 @@ class RegistryService:
         repo_root_norm: str,
     ) -> RegistryResult:
         project_id = new_id()
+        binding_generation = new_id()
         storage_path = expected_project_storage_path(self.home, project_id)
         if not storage_path_matches_expected(
             storage_path,
@@ -332,9 +367,11 @@ class RegistryService:
                     last_status,
                     last_indexed_at,
                     last_git_commit,
-                    repo_fingerprint_json
+                    repo_fingerprint_json,
+                    repo_binding_generation,
+                    snapshot_binding_generation
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -347,6 +384,8 @@ class RegistryService:
                     created_at,
                     "REGISTERED",
                     fingerprint.to_json(),
+                    binding_generation,
+                    binding_generation,
                 ),
             )
             self._log_event(

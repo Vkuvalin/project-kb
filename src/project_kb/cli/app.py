@@ -13,6 +13,7 @@ from project_kb.output.text import format_capabilities, format_error
 from project_kb.registry import RegistryResult, RegistryService
 from project_kb.resolver.project import ProjectStatusService
 from project_kb.resolver.state import ProjectState
+from project_kb.snapshot.currentness import VerificationMode
 from project_kb.version import __version__
 
 app = typer.Typer(
@@ -68,10 +69,20 @@ def status(
         bool,
         typer.Option("--json", help="Print a JSON response envelope."),
     ] = False,
+    verify: Annotated[
+        VerificationMode | None,
+        typer.Option(
+            "--verify",
+            help=(
+                "Verify snapshot currentness with strong proof. "
+                "The legacy fast token returns FAST_VERIFICATION_REMOVED."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Show current Project KB status."""
 
-    outcome = ProjectStatusService().status(project_name)
+    outcome = ProjectStatusService().status(project_name, verification_mode=verify)
     warnings = []
     if outcome.project_state is ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING:
         warnings.append(
@@ -103,6 +114,8 @@ def status(
         return
 
     typer.echo(f"{outcome.project_state.value}: {outcome.message}")
+    if outcome.snapshot_check.verified_at:
+        typer.echo(f"Verified at: {outcome.snapshot_check.verified_at}")
     if outcome.recommended_action.command:
         typer.echo(f"Recommended: {outcome.recommended_action.command}")
     if outcome.exit_code != OK:

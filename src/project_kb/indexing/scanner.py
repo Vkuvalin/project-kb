@@ -9,7 +9,17 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from project_kb.git_utils import (
+    GitIndexChangedError,
+    TemporaryGitIndex,
+    git_bytes,
+    git_text,
+    git_z,
+    live_git_index_generation,
+    temporary_git_index,
+)
 from project_kb.indexing.extractor import extract_python, stable_id
+from project_kb.indexing.identity import file_occurrence_id
 from project_kb.indexing.models import (
     Candidate,
     FileFact,
@@ -17,9 +27,20 @@ from project_kb.indexing.models import (
     ObjectEvidence,
     PrunedRootFact,
     RelationFact,
+    RepoObservation,
     RepoState,
     ScanFacts,
     ScanPolicy,
+)
+from project_kb.indexing.module_map import (
+    MODULE_MAP_VERSION,
+    ModuleMap,
+    ModuleResolutionStatus,
+    PackagingEvidence,
+    PackagingEvidenceState,
+    absolute_import_target,
+    build_module_map,
+    packaging_evidence_from_pyproject_text,
 )
 from project_kb.indexing.policy import (
     hard_secret_reason,
@@ -51,9 +72,28 @@ class FileReadError(ScanError):
     """An ordinary read or descriptor operation failed."""
 
 
-def git_candidates(repo_root: Path, policy: ScanPolicy | None = None) -> list[Candidate]:
-    tracked = _git_z(repo_root, "ls-files", "-z")
-    untracked = _git_z(repo_root, "ls-files", "--others", "--exclude-standard", "-z")
+_PACKAGING_MARKERS = ("pyproject.toml", "setup.cfg", "setup.py")
+
+
+def git_candidates(
+    repo_root: Path,
+    policy: ScanPolicy | None = None,
+    *,
+    index_view: TemporaryGitIndex | None = None,
+) -> list[Candidate]:
+    if index_view is None:
+        tracked = _git_z(repo_root, "ls-files", "-z")
+        untracked = _git_z(repo_root, "ls-files", "--others", "--exclude-standard", "-z")
+    else:
+        tracked = _git_z(repo_root, "ls-files", "-z", index_view=index_view)
+        untracked = _git_z(
+            repo_root,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            index_view=index_view,
+        )
     population: dict[str, str] = {}
     for raw in tracked:
         path = normalize_relative_path(raw)
@@ -79,6 +119,7 @@ def capture_repo_state(
     candidates: list[Candidate] | None = None,
     policy: ScanPolicy | None = None,
 ) -> RepoState:
+    visibility_flags_before = git_index_flagged_paths(repo_root)
     candidates = candidates if candidates is not None else git_candidates(repo_root, policy)
     head = _git_text(repo_root, "rev-parse", "--verify", "HEAD", allow_failure=True) or None
     branch = (
@@ -86,21 +127,153 @@ def capture_repo_state(
         or None
     )
     status = _git_bytes(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    index_visibility_paths = git_index_flagged_paths(repo_root)
     candidate_payload = "".join(f"{c.population}\0{c.relative_path}\0" for c in candidates)
     return RepoState(
         head=head,
         branch=branch,
         status_fingerprint=hashlib.sha256(status).hexdigest(),
         candidate_fingerprint=hashlib.sha256(candidate_payload.encode("utf-8")).hexdigest(),
+        visibility_flags_before=visibility_flags_before,
+        index_visibility_paths=index_visibility_paths,
     )
 
 
-def scan_repository(repo_root: Path, candidates: list[Candidate], policy: ScanPolicy) -> ScanFacts:
+def capture_repo_observation(
+    repo_root: Path,
+    policy: ScanPolicy | None = None,
+    *,
+    temporary_root: Path,
+) -> RepoObservation:
+    """Capture candidates and status through one visibility-neutral index generation."""
+
+    try:
+        with temporary_git_index(repo_root, temporary_root=temporary_root) as index_view:
+            source_visibility_paths = git_index_flagged_paths(repo_root)
+            if git_index_flagged_paths(repo_root, index_view=index_view):
+                raise ScanError("temporary Git index visibility flags could not be neutralized")
+            candidates = git_candidates(repo_root, policy, index_view=index_view)
+            head = (
+                _git_text(
+                    repo_root,
+                    "rev-parse",
+                    "--verify",
+                    "HEAD",
+                    allow_failure=True,
+                    index_view=index_view,
+                )
+                or None
+            )
+            branch = (
+                _git_text(
+                    repo_root,
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "HEAD",
+                    allow_failure=True,
+                    index_view=index_view,
+                )
+                or None
+            )
+            status = _git_bytes(
+                repo_root,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                index_view=index_view,
+            )
+            generation_after = live_git_index_generation(
+                repo_root,
+                expected_path=index_view.source_path,
+            )
+    except GitIndexChangedError as exc:
+        raise RepositoryChangedError("live Git index changed during observation") from exc
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        raise ScanError(f"Git repository inspection failed: {type(exc).__name__}") from exc
+
+    candidate_payload = "".join(
+        f"{candidate.population}\0{candidate.relative_path}\0" for candidate in candidates
+    )
+    state = RepoState(
+        head=head,
+        branch=branch,
+        status_fingerprint=hashlib.sha256(status).hexdigest(),
+        candidate_fingerprint=hashlib.sha256(candidate_payload.encode("utf-8")).hexdigest(),
+        visibility_flags_before=source_visibility_paths,
+        index_visibility_paths=source_visibility_paths,
+    )
+    return RepoObservation(
+        state=state,
+        candidates=tuple(candidates),
+        index_generation_before=index_view.source_generation,
+        index_generation_after=generation_after,
+    )
+
+
+def git_status_paths(repo_root: Path) -> tuple[str, ...]:
+    """Return every path named by the bounded porcelain-v1 status observation."""
+
+    payload = _git_bytes(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    fields = payload.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if not field:
+            continue
+        if len(field) < 4 or field[2:3] != b" ":
+            raise ScanError("Git status returned an invalid porcelain record")
+        status = field[:2]
+        paths.append(field[3:].decode("utf-8", errors="surrogateescape"))
+        if (b"R" in status or b"C" in status) and index < len(fields) and fields[index]:
+            paths.append(fields[index].decode("utf-8", errors="surrogateescape"))
+            index += 1
+    try:
+        return tuple(sorted({normalize_relative_path(path) for path in paths}, key=path_key))
+    except ValueError as exc:
+        raise ScanError("Git status returned an unsafe repository-relative path") from exc
+
+
+def git_index_flagged_paths(
+    repo_root: Path,
+    *,
+    index_view: TemporaryGitIndex | None = None,
+) -> tuple[str, ...]:
+    """Return tracked paths whose index flags can hide working-tree changes."""
+
+    payload = _git_bytes(repo_root, "ls-files", "-v", "-z", index_view=index_view)
+    paths: list[str] = []
+    for field in payload.split(b"\0"):
+        if not field:
+            continue
+        if len(field) < 3 or field[1:2] != b" ":
+            raise ScanError("Git ls-files returned an invalid index-flag record")
+        tag = field[:1]
+        if tag != b"H":
+            paths.append(field[2:].decode("utf-8", errors="surrogateescape"))
+    try:
+        return tuple(sorted({normalize_relative_path(path) for path in paths}, key=path_key))
+    except ValueError as exc:
+        raise ScanError("Git index flags named an unsafe repository-relative path") from exc
+
+
+def scan_repository(
+    repo_root: Path,
+    candidates: list[Candidate],
+    policy: ScanPolicy,
+    *,
+    snapshot_id: str | None = None,
+) -> ScanFacts:
     facts = ScanFacts(candidate_count=len(candidates))
     classification_ns = 0
     read_ns = 0
     parse_ns = 0
     pruned_seen: set[str] = set()
+    python_sources: list[tuple[FileFact, str]] = []
+    pyproject_text: str | None = None
 
     for candidate in candidates:
         start = time.perf_counter_ns()
@@ -294,23 +467,51 @@ def scan_repository(repo_root: Path, candidates: list[Candidate], policy: ScanPo
             stat_signature=_stat_signature(stat),
             content_hash=content_hash,
         )
+        if relative_path == "pyproject.toml":
+            pyproject_text = source
         if file_fact.language == "python":
-            parse_start = time.perf_counter_ns()
-            symbols, imports, relations, diagnostics = extract_python(
-                file_id=file_id,
-                relative_path=relative_path,
-                source=source,
-                line_count=line_count,
+            python_sources.append((file_fact, source))
+
+    python_paths = [file.relative_path for file, _ in python_sources]
+    packaging_evidence = _root_packaging_evidence(repo_root, pyproject_text=pyproject_text)
+    module_map = build_module_map(python_paths, packaging_evidence=packaging_evidence)
+    facts.module_map_version = MODULE_MAP_VERSION
+    facts.packaging_evidence_state = module_map.packaging_evidence.state.value
+    facts.packaging_evidence_markers = module_map.packaging_evidence.markers
+    for observed_file in facts.files:
+        if snapshot_id is not None:
+            observed_file.file_occurrence_id = file_occurrence_id(
+                snapshot_id, observed_file.relative_path
             )
-            parse_ns += time.perf_counter_ns() - parse_start
-            file_fact.parse_status = "FAILED" if diagnostics else "SUCCESS"
-            facts.symbols.extend(symbols)
-            facts.imports.extend(imports)
-            facts.relations.extend(relations)
-            facts.diagnostics.extend(diagnostics)
+        if observed_file.language != "python":
+            observed_file.module_resolution_status = ModuleResolutionStatus.NOT_IMPORTABLE.value
+    for file_fact, source in python_sources:
+        module_identity = module_map.for_path(file_fact.relative_path)
+        file_fact.source_root_id = module_identity.source_root_id
+        file_fact.source_root_path = module_identity.source_root_path
+        file_fact.source_root_origin = module_identity.source_root_origin
+        file_fact.module_name = module_identity.module_name
+        file_fact.module_resolution_status = module_identity.resolution_status.value
+        file_fact.module_candidates = module_identity.module_candidates
+        file_fact.is_importable = module_identity.is_importable
+        parse_start = time.perf_counter_ns()
+        symbols, imports, relations, diagnostics = extract_python(
+            file_id=file_fact.file_id,
+            relative_path=file_fact.relative_path,
+            source=source,
+            line_count=file_fact.line_count or 0,
+            snapshot_id=snapshot_id,
+            module_identity=module_identity,
+        )
+        parse_ns += time.perf_counter_ns() - parse_start
+        file_fact.parse_status = "FAILED" if diagnostics else "SUCCESS"
+        facts.symbols.extend(symbols)
+        facts.imports.extend(imports)
+        facts.relations.extend(relations)
+        facts.diagnostics.extend(diagnostics)
 
     relations_start = time.perf_counter_ns()
-    _resolve_imports(facts)
+    _resolve_imports(facts, module_map=module_map)
     facts.timings.update(
         {
             "classification_ms": classification_ns // 1_000_000,
@@ -322,17 +523,77 @@ def scan_repository(repo_root: Path, candidates: list[Candidate], policy: ScanPo
     return facts
 
 
-def _resolve_imports(facts: ScanFacts) -> None:
+def _root_packaging_evidence(
+    repo_root: Path,
+    *,
+    pyproject_text: str | None,
+) -> PackagingEvidence:
+    """Classify root packaging markers without executing or broadly parsing them."""
+
+    markers: list[str] = []
+    unreadable_markers: list[str] = []
+    for marker in _PACKAGING_MARKERS:
+        path = repo_root / marker
+        observed = _lstat_for_read(path)
+        if observed is None:
+            continue
+        markers.append(marker)
+        if not stat_module.S_ISREG(observed.st_mode) or _is_redirect(path):
+            unreadable_markers.append(marker)
+
+    marker_tuple = tuple(markers)
+    if not marker_tuple:
+        return PackagingEvidence(PackagingEvidenceState.ABSENT)
+    if "pyproject.toml" in marker_tuple and pyproject_text is None:
+        unreadable_markers.append("pyproject.toml")
+    if unreadable_markers:
+        return PackagingEvidence(
+            PackagingEvidenceState.UNREADABLE,
+            markers=marker_tuple,
+            diagnostics=tuple(
+                f"PACKAGING_MARKER_UNREADABLE:{marker}"
+                for marker in sorted(set(unreadable_markers))
+            ),
+        )
+
+    pyproject_evidence = (
+        packaging_evidence_from_pyproject_text(pyproject_text)
+        if "pyproject.toml" in marker_tuple
+        else PackagingEvidence(PackagingEvidenceState.ABSENT)
+    )
+    if "setup.cfg" in marker_tuple or "setup.py" in marker_tuple:
+        diagnostics = list(pyproject_evidence.diagnostics)
+        if "setup.cfg" in marker_tuple:
+            diagnostics.append("SETUP_CFG_PRESENT")
+        if "setup.py" in marker_tuple:
+            diagnostics.append("SETUP_PY_PRESENT")
+        return PackagingEvidence(
+            PackagingEvidenceState.UNSUPPORTED,
+            markers=marker_tuple,
+            pyproject_text=pyproject_text,
+            source_roots=pyproject_evidence.source_roots,
+            diagnostics=tuple(diagnostics),
+        )
+    return PackagingEvidence(
+        pyproject_evidence.state,
+        markers=marker_tuple,
+        pyproject_text=pyproject_evidence.pyproject_text,
+        source_roots=pyproject_evidence.source_roots,
+        diagnostics=pyproject_evidence.diagnostics,
+    )
+
+
+def _resolve_imports(facts: ScanFacts, *, module_map: ModuleMap | None = None) -> None:
     file_by_id = {file.file_id: file for file in facts.files}
-    module_map: dict[str, set[str]] = {}
-    local_roots: set[str] = set()
+    legacy_module_map: dict[str, set[str]] = {}
+    legacy_local_roots: set[str] = set()
     for file in facts.files:
         if file.language != "python":
             continue
         for module in _module_names(file.relative_path):
-            module_map.setdefault(module, set()).add(file.file_id)
+            legacy_module_map.setdefault(module, set()).add(file.file_id)
             if module:
-                local_roots.add(module.split(".", 1)[0])
+                legacy_local_roots.add(module.split(".", 1)[0])
 
     for item in facts.imports:
         source = file_by_id[item.file_id]
@@ -342,7 +603,7 @@ def _resolve_imports(facts: ScanFacts) -> None:
             possible.insert(0, f"{target_module}.{item.imported_name}".strip("."))
         matches: set[str] = set()
         for module in possible:
-            matches = module_map.get(module, set())
+            matches = legacy_module_map.get(module, set())
             if matches:
                 break
         if len(matches) == 1:
@@ -350,10 +611,13 @@ def _resolve_imports(facts: ScanFacts) -> None:
             item.resolved_file_id = next(iter(matches))
         elif len(matches) > 1:
             item.resolution_status = "AMBIGUOUS"
-        elif item.relative_level or target_module.split(".", 1)[0] in local_roots:
+        elif item.relative_level or target_module.split(".", 1)[0] in legacy_local_roots:
             item.resolution_status = "UNRESOLVED"
         else:
             item.resolution_status = "EXTERNAL"
+
+        if module_map is not None:
+            _resolve_v2_import(item, source=source, facts=facts, module_map=module_map)
 
         facts.relations.append(
             RelationFact(
@@ -390,6 +654,55 @@ def _resolve_imports(facts: ScanFacts) -> None:
                     evidence_kind="DETERMINISTIC_MODULE_MAP",
                 )
             )
+
+
+def _resolve_v2_import(
+    item: ImportFact,
+    *,
+    source: FileFact,
+    facts: ScanFacts,
+    module_map: ModuleMap,
+) -> None:
+    source_identity = module_map.for_path(source.relative_path)
+    target_module = absolute_import_target(
+        source_identity,
+        source_is_package=source.relative_path.endswith("/__init__.py"),
+        module_text=item.module_text,
+        relative_level=item.relative_level,
+    )
+    if target_module is None:
+        item.v2_resolution_status = "AMBIGUOUS"
+        return
+    possible = [target_module]
+    if item.import_kind == "IMPORT_FROM" and item.imported_name not in {None, "*"}:
+        possible.insert(0, f"{target_module}.{item.imported_name}".strip("."))
+    file_ids_by_module: dict[str, set[str]] = {}
+    local_roots: set[str] = set()
+    file_by_id = {file.file_id: file for file in facts.files}
+    for file in facts.files:
+        if file.module_name and file.module_resolution_status == ModuleResolutionStatus.EXACT.value:
+            file_ids_by_module.setdefault(file.module_name, set()).add(file.file_id)
+            local_roots.add(file.module_name.split(".", 1)[0])
+        for candidate in file.module_candidates:
+            if candidate:
+                local_roots.add(candidate.split(".", 1)[0])
+    matches: set[str] = set()
+    normalized = target_module
+    for possible_module in possible:
+        matches = file_ids_by_module.get(possible_module, set())
+        if matches:
+            normalized = possible_module
+            break
+    item.normalized_module_name = normalized
+    if len(matches) == 1:
+        item.v2_resolution_status = "EXACT"
+        item.v2_resolved_file_occurrence_id = file_by_id[next(iter(matches))].file_occurrence_id
+    elif len(matches) > 1:
+        item.v2_resolution_status = "AMBIGUOUS"
+    elif item.relative_level or target_module.split(".", 1)[0] in local_roots:
+        item.v2_resolution_status = "UNRESOLVED"
+    else:
+        item.v2_resolution_status = "EXTERNAL"
 
 
 def _module_names(relative_path: str) -> set[str]:
@@ -545,34 +858,104 @@ def _policy_candidates(repo_root: Path, policy: ScanPolicy) -> list[Candidate]:
 
 def verify_scan_evidence(repo_root: Path, facts: ScanFacts, policy: ScanPolicy) -> bool:
     for evidence in facts.evidence.values():
-        relative_path = evidence.relative_path
-        path = repo_root / Path(*PurePosixPath(relative_path).parts)
-        redirected = _has_redirected_component(repo_root, relative_path)
-        if evidence.evidence_kind in {"REDIRECT", "REDIRECTED_PRUNED_ROOT"}:
-            if not redirected:
-                return False
-            continue
-        if redirected:
+        try:
+            matches, _ = compare_persisted_evidence(
+                repo_root,
+                evidence,
+                policy,
+                content_semantics=False,
+            )
+        except RepositoryChangedError, UnsafePathError:
             return False
-        current = _safe_lstat(path)
-        if _stat_signature(current) != evidence.stat_signature:
+        if not matches:
             return False
-        if evidence.evidence_kind == "TEXT":
-            if current is None:
-                return False
-            try:
-                raw, binary = _read_safe_file(
-                    repo_root,
-                    path,
-                    current,
-                    policy,
-                    preclassified_safe=True,
-                )
-            except RepositoryChangedError, UnsafePathError:
-                return False
-            if binary or raw is None or hashlib.sha256(raw).hexdigest() != evidence.content_hash:
-                return False
     return True
+
+
+def compare_persisted_evidence(
+    repo_root: Path,
+    evidence: ObjectEvidence,
+    policy: ScanPolicy,
+    *,
+    content_semantics: bool,
+) -> tuple[bool, str]:
+    """Compare one persisted proof through the scanner-owned safe observation boundary.
+
+    Publication validation uses exact object evidence. Strong currentness deliberately
+    treats safe text content as the semantic proof and therefore does not make an
+    mtime-only change stale. Hard-secret content is never opened by this operation.
+    """
+
+    relative_path = evidence.relative_path
+    path = repo_root / Path(*PurePosixPath(relative_path).parts)
+    redirected = _has_redirected_component(repo_root, relative_path)
+    if evidence.evidence_kind in {"REDIRECT", "REDIRECTED_PRUNED_ROOT"}:
+        return redirected, "redirect_unchanged" if redirected else "redirect_removed"
+    if redirected:
+        return False, "path_became_redirected"
+
+    current = _safe_lstat(path)
+    if evidence.evidence_kind == "MISSING":
+        return current is None, "missing_unchanged" if current is None else "path_appeared"
+    if current is None:
+        return False, "path_missing"
+
+    current_signature = _stat_signature(current)
+    if evidence.evidence_kind == "HARD_SECRET":
+        if hard_secret_reason(relative_path) is None:
+            return False, "hard_secret_classification_changed"
+        if content_semantics:
+            return True, "hard_secret_content_excluded"
+        return (
+            current_signature == evidence.stat_signature,
+            "hard_secret_metadata_unchanged"
+            if current_signature == evidence.stat_signature
+            else "hard_secret_metadata_changed",
+        )
+
+    if evidence.evidence_kind == "TEXT":
+        if not stat_module.S_ISREG(current.st_mode):
+            return False, "text_path_not_regular"
+        if not supported_text(relative_path):
+            return False, "text_classification_changed"
+        if current.st_size > policy.max_text_bytes:
+            return False, "text_size_limit_exceeded"
+        if not content_semantics and current_signature != evidence.stat_signature:
+            return False, "object_metadata_changed"
+        raw, binary = _read_safe_file(
+            repo_root,
+            path,
+            current,
+            policy,
+            preclassified_safe=True,
+        )
+        if binary or raw is None:
+            return False, "text_became_binary"
+        matches = hashlib.sha256(raw).hexdigest() == evidence.content_hash
+        return matches, "content_unchanged" if matches else "content_hash_changed"
+
+    if current_signature != evidence.stat_signature:
+        return False, "bounded_metadata_changed"
+    if evidence.evidence_kind in {"BINARY", "UNSUPPORTED_ENCODING"} and content_semantics:
+        if not stat_module.S_ISREG(current.st_mode):
+            return False, "bounded_object_not_regular"
+        raw, binary = _read_safe_file(
+            repo_root,
+            path,
+            current,
+            policy,
+            preclassified_safe=True,
+        )
+        if evidence.evidence_kind == "BINARY":
+            return binary, "binary_classification_unchanged" if binary else "binary_became_text"
+        if binary or raw is None:
+            return False, "encoding_object_became_binary"
+        try:
+            raw.decode("utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8")
+        except UnicodeDecodeError:
+            return True, "encoding_classification_unchanged"
+        return False, "unsupported_encoding_became_text"
+    return True, "bounded_metadata_unchanged"
 
 
 def _read_safe_file(
@@ -734,32 +1117,40 @@ def _line_count(source: str) -> int:
     return source.count("\n") + (0 if source.endswith("\n") else 1)
 
 
-def _git_z(repo_root: Path, *args: str) -> list[str]:
-    payload = _git_bytes(repo_root, *args)
-    return [item.decode("utf-8", errors="surrogateescape") for item in payload.split(b"\0") if item]
-
-
-def _git_text(repo_root: Path, *args: str, allow_failure: bool = False) -> str:
-    process = _run_git(repo_root, *args, check=not allow_failure)
-    return (
-        process.stdout.decode("utf-8", errors="strict").strip() if process.returncode == 0 else ""
-    )
-
-
-def _git_bytes(repo_root: Path, *args: str) -> bytes:
-    return _run_git(repo_root, *args, check=True).stdout
-
-
-def _run_git(repo_root: Path, *args: str, check: bool) -> subprocess.CompletedProcess[bytes]:
-    environment = os.environ.copy()
-    environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+def _git_z(
+    repo_root: Path,
+    *args: str,
+    index_view: TemporaryGitIndex | None = None,
+) -> list[str]:
     try:
-        return subprocess.run(
-            ["git", "-c", "core.quotepath=false", *args],
-            cwd=repo_root,
-            check=check,
-            capture_output=True,
-            env=environment,
+        return git_z(repo_root, *args, index_view=index_view)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        raise ScanError(f"Git repository inspection failed: {type(exc).__name__}") from exc
+
+
+def _git_text(
+    repo_root: Path,
+    *args: str,
+    allow_failure: bool = False,
+    index_view: TemporaryGitIndex | None = None,
+) -> str:
+    try:
+        return git_text(
+            repo_root,
+            *args,
+            allow_failure=allow_failure,
+            index_view=index_view,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        raise ScanError(f"Git repository inspection failed: {type(exc).__name__}") from exc
+
+
+def _git_bytes(
+    repo_root: Path,
+    *args: str,
+    index_view: TemporaryGitIndex | None = None,
+) -> bytes:
+    try:
+        return git_bytes(repo_root, *args, index_view=index_view)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         raise ScanError(f"Git repository inspection failed: {type(exc).__name__}") from exc

@@ -3,11 +3,12 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sqlite3
-import subprocess
 from pathlib import Path
 
 import pytest
+from _git_support import git as run_test_git
 from typer.testing import CliRunner
 
 from project_kb.cli.app import app
@@ -26,7 +27,7 @@ from project_kb.indexing.scanner import (
 )
 from project_kb.indexing.service import IndexService
 from project_kb.registry import RegistryService
-from project_kb.snapshot.database import validate_snapshot
+from project_kb.snapshot.database import SnapshotReader, validate_snapshot
 
 runner = CliRunner()
 
@@ -884,6 +885,43 @@ def test_registry_failure_after_publication_reconciles_to_published_snapshot(
     assert any(item["short_name"] == "after" for item in query_payload["data"]["symbols"])
 
 
+def test_same_root_relink_after_replace_quarantines_published_snapshot(
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (temp_git_repo / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    project = RegistryService().register("repo-one", temp_git_repo).project
+    assert project is not None
+    service = IndexService()
+    real_record_outcome = service.registry.record_index_outcome
+
+    def relink_before_recording(*args: object, **kwargs: object):
+        RegistryService().relink("repo-one", temp_git_repo)
+        return real_record_outcome(*args, **kwargs)
+
+    monkeypatch.setattr(service.registry, "record_index_outcome", relink_before_recording)
+
+    with pytest.raises(IndexingError) as captured:
+        service.index("repo-one")
+
+    assert captured.value.code == "SNAPSHOT_REBUILD_REQUIRED"
+    assert captured.value.details["published"] is True
+    assert captured.value.details["usable"] is False
+    assert captured.value.details["publication_state"] == "PUBLISHED_QUARANTINED"
+    active = RegistryService().find_project_by_name("repo-one")
+    assert active is not None
+    assert active.repo_binding_generation != project.repo_binding_generation
+    database = Path(project.storage_path) / "kb.sqlite"
+    metadata = validate_snapshot(database, project_id=project.project_id)
+    assert metadata["repository_binding_generation"] == project.repo_binding_generation
+    status = service.status_service.status("repo-one")
+    assert status.project_state == "SNAPSHOT_REBUILD_REQUIRED"
+    assert status.availability.can_use_snapshot is False
+    query = runner.invoke(app, ["symbols", "repo-one", "--json"])
+    assert query.exit_code == 21
+    assert not list(Path(project.storage_path).glob("*.bak"))
+
+
 def test_unexpected_exception_after_replace_never_records_index_failed(
     temp_git_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -931,11 +969,16 @@ def test_exception_raised_after_successful_replace_reconciles_to_published(
 
     assert outcome.result == "success_with_warnings"
     assert outcome.data["publication"]["state"] == "PUBLISHED"
+    assert outcome.data["snapshot"]["published"] is True
+    assert outcome.data["snapshot"]["truth_claim"] == "CAPTURED_STABLE"
     assert outcome.data["publication"]["bookkeeping"] == {
         "registry": "unknown",
         "run_file": "unknown",
     }
     assert outcome.warnings[0]["code"] == "POST_PUBLICATION_ANCILLARY_FAILURE"
+    warning_message = outcome.warnings[0]["message"]
+    assert "published successfully" in warning_message.lower()
+    assert "current" not in warning_message.lower()
     status = service.status_service.status("repo-one")
     assert not (status.project and (status.project.last_status or "").startswith("INDEX_FAILED:"))
     query = runner.invoke(app, ["symbols", "repo-one", "--file", "module.py", "--json"])
@@ -1061,33 +1104,42 @@ def test_query_after_failed_refresh_warns_and_exposes_provenance(
     assert symbol["extractor_version"] == "1"
 
 
-def test_symbol_name_filter_is_literal_case_sensitive_prefix(temp_git_repo: Path) -> None:
+def test_symbol_name_filter_is_literal_case_sensitive_prefix(
+    temp_git_repo: Path,
+    tmp_path: Path,
+) -> None:
     (temp_git_repo / "names.py").write_text(
         "class PaymentService:\n"
         "    pass\n\n"
         "class payment_service:\n"
         "    pass\n\n"
         "def A_value():\n"
+        "    pass\n\n"
+        "def AXvalue():\n"
         "    pass\n"
     )
-    # Percent is not legal in a Python identifier, so use a deterministic direct
-    # database mutation to exercise the literal SQL contract after publication.
     project = RegistryService().register("repo-one", temp_git_repo).project
     assert project is not None
     IndexService().index("repo-one")
     database = Path(project.storage_path) / "kb.sqlite"
-    with contextlib.closing(sqlite3.connect(database)) as conn:
+
+    upper = runner.invoke(app, ["symbols", "repo-one", "--name", "Payment", "--json"])
+    lower = runner.invoke(app, ["symbols", "repo-one", "--name", "payment", "--json"])
+    underscore = runner.invoke(app, ["symbols", "repo-one", "--name", "A_", "--json"])
+    empty = runner.invoke(app, ["symbols", "repo-one", "--name", "", "--json"])
+
+    # Percent is not legal in a Python identifier. Exercise its literal SQL
+    # escaping on a disposable validated copy, never the published canonical DB.
+    query_fixture = tmp_path / "literal-filter.sqlite"
+    shutil.copy2(database, query_fixture)
+    reader = SnapshotReader(query_fixture, project_id=project.project_id)
+    with contextlib.closing(sqlite3.connect(query_fixture)) as conn:
         conn.execute(
             "UPDATE symbols SET short_name = 'A%value', qualified_name = 'A%value' "
             "WHERE short_name = 'A_value'"
         )
         conn.commit()
-
-    upper = runner.invoke(app, ["symbols", "repo-one", "--name", "Payment", "--json"])
-    lower = runner.invoke(app, ["symbols", "repo-one", "--name", "payment", "--json"])
-    underscore = runner.invoke(app, ["symbols", "repo-one", "--name", "A_", "--json"])
-    percent = runner.invoke(app, ["symbols", "repo-one", "--name", "A%", "--json"])
-    empty = runner.invoke(app, ["symbols", "repo-one", "--name", "", "--json"])
+    percent = reader.symbols(name="A%")
 
     assert [item["short_name"] for item in json.loads(upper.output)["data"]["symbols"]] == [
         "PaymentService"
@@ -1095,11 +1147,11 @@ def test_symbol_name_filter_is_literal_case_sensitive_prefix(temp_git_repo: Path
     assert [item["short_name"] for item in json.loads(lower.output)["data"]["symbols"]] == [
         "payment_service"
     ]
-    assert json.loads(underscore.output)["data"]["symbols"] == []
-    assert [item["short_name"] for item in json.loads(percent.output)["data"]["symbols"]] == [
-        "A%value"
+    assert [item["short_name"] for item in json.loads(underscore.output)["data"]["symbols"]] == [
+        "A_value"
     ]
-    assert len(json.loads(empty.output)["data"]["symbols"]) >= 3
+    assert [item["short_name"] for item in percent] == ["A%value"]
+    assert len(json.loads(empty.output)["data"]["symbols"]) >= 4
 
 
 def test_structural_and_observation_fingerprints_have_distinct_semantics(
@@ -1167,6 +1219,4 @@ def _indexed_project(temp_git_repo: Path):
 
 
 def _git(repo: Path, *args: str) -> None:
-    environment = os.environ.copy()
-    environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=environment)
+    run_test_git(repo, *args)

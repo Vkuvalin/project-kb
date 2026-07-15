@@ -26,6 +26,8 @@ class ProjectRecord:
     last_indexed_at: str | None
     last_git_commit: str | None
     repo_fingerprint_json: str | None
+    repo_binding_generation: str
+    snapshot_binding_generation: str
 
     @classmethod
     def from_row(cls, row: Row) -> ProjectRecord:
@@ -58,6 +60,14 @@ class ProjectRecord:
             last_indexed_at=row["last_indexed_at"],
             last_git_commit=row["last_git_commit"],
             repo_fingerprint_json=row["repo_fingerprint_json"],
+            repo_binding_generation=_binding_generation(
+                row["repo_binding_generation"],
+                field="repo_binding_generation",
+            ),
+            snapshot_binding_generation=_binding_generation(
+                row["snapshot_binding_generation"],
+                field="snapshot_binding_generation",
+            ),
         )
 
     def to_dict(self) -> dict[str, str | None]:
@@ -72,3 +82,9 @@ class ProjectRecord:
             "last_git_commit": self.last_git_commit,
             "updated_at": self.updated_at,
         }
+
+
+def _binding_generation(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not PROJECT_ID_PATTERN.fullmatch(value):
+        raise RegistryOperationError(f"Registry project record contains an invalid {field}.")
+    return value

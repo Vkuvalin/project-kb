@@ -3,10 +3,11 @@
 import hashlib
 import json
 import os
-import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from project_kb.git_utils import git_text, run_git
 
 FINGERPRINT_STRENGTHS = {"strong", "weak", "unavailable"}
 
@@ -92,7 +93,14 @@ def build_repository_fingerprint(repo_root: Path) -> RepositoryFingerprint:
     head_commit = _git_output(resolved_root, "rev-parse", "--verify", "HEAD")
     is_shallow = _git_output(resolved_root, "rev-parse", "--is-shallow-repository") == "true"
 
-    remote_origin = _git_output(resolved_root, "config", "--get", "remote.origin.url")
+    remote_origin = _git_output(
+        resolved_root,
+        "config",
+        "--local",
+        "--no-includes",
+        "--get",
+        "remote.origin.url",
+    )
     remote_origin_hash = (
         hashlib.sha256(remote_origin.encode("utf-8")).hexdigest() if remote_origin else None
     )
@@ -124,6 +132,8 @@ def compare_repository_fingerprints(
 
     if stored.git_root_norm != current.git_root_norm:
         return FingerprintComparison(False, "mismatch", "fingerprint_git_root_changed")
+    if stored.remote_origin_hash != current.remote_origin_hash:
+        return FingerprintComparison(False, "mismatch", "remote_origin_hash_changed")
 
     if stored.fingerprint_strength == "strong" and stored.root_commits:
         if not set(stored.root_commits).issubset(current.root_commits):
@@ -150,41 +160,34 @@ def normalize_path(path: Path) -> str:
     return os.path.normcase(os.path.abspath(path.expanduser().resolve(strict=False)))
 
 
+def repository_identity_hash(repo_root_norm: str, fingerprint_json: str | None) -> str:
+    """Bind a snapshot to normalized registration evidence without exposing a remote URL."""
+
+    fingerprint: Any = None
+    if fingerprint_json is not None:
+        try:
+            fingerprint = json.loads(fingerprint_json)
+        except json.JSONDecodeError:
+            fingerprint = fingerprint_json
+    payload = json.dumps(
+        {"repo_root_norm": repo_root_norm, "fingerprint": fingerprint},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _git_commit_exists(repo_root: Path, commit: str) -> bool:
     try:
-        result = subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
-            cwd=repo_root,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=_safe_git_environment(),
-        )
-    except OSError:
+        result = run_git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}", check=False)
+    except OSError, ValueError:
         return False
     return result.returncode == 0
 
 
 def _git_output(repo_root: Path, *args: str) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=repo_root,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=_safe_git_environment(),
-        )
-    except OSError:
+        value = git_text(repo_root, *args, allow_failure=True)
+    except OSError, ValueError:
         return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
     return value or None
-
-
-def _safe_git_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["GIT_NO_LAZY_FETCH"] = "1"
-    environment["GIT_OPTIONAL_LOCKS"] = "0"
-    return environment

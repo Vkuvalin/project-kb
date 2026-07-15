@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from project_kb.indexing.scanner import (
 )
 from project_kb.registry.service import RegistryService, utc_now
 from project_kb.resolver.project import ProjectStatusService
+from project_kb.resolver.repo_identity import repository_identity_hash
 from project_kb.resolver.state import ProjectState
 from project_kb.snapshot.database import (
     EXPECTED_EXTRACTORS,
@@ -30,6 +32,12 @@ from project_kb.snapshot.database import (
     validate_snapshot,
     write_snapshot,
 )
+
+
+class _CanonicalPublicationState(StrEnum):
+    ACTIVE = "ACTIVE"
+    QUARANTINED = "QUARANTINED"
+    NOT_PUBLISHED = "NOT_PUBLISHED"
 
 
 class IndexService:
@@ -84,6 +92,10 @@ class IndexService:
             raise IndexingError("Index command gating failed.", retryable=False)
 
         project = status.project
+        active_repository_identity_hash = repository_identity_hash(
+            project.repo_root_norm,
+            project.repo_fingerprint_json,
+        )
         repo_root = Path(project.repo_root)
         storage_path = Path(project.storage_path)
         current_path = storage_path / "kb.sqlite"
@@ -102,12 +114,22 @@ class IndexService:
                 candidates = git_candidates(repo_root, self.policy)
                 before = capture_repo_state(repo_root, candidates, self.policy)
                 enumeration_ms = (time.perf_counter_ns() - enumeration_start) // 1_000_000
-                facts = scan_repository(repo_root, candidates, self.policy)
+                facts = scan_repository(
+                    repo_root,
+                    candidates,
+                    self.policy,
+                    snapshot_id=snapshot_id,
+                )
                 facts.timings["enumeration_ms"] = enumeration_ms
                 evidence_stable = verify_scan_evidence(repo_root, facts, self.policy)
                 after_candidates = git_candidates(repo_root, self.policy)
                 after = capture_repo_state(repo_root, after_candidates, self.policy)
-                if before != after or not evidence_stable:
+                if (
+                    before != after
+                    or not before.visibility_sealed
+                    or not after.visibility_sealed
+                    or not evidence_stable
+                ):
                     raise RepositoryChangedError(
                         "repository candidates or processed objects changed after extraction"
                     )
@@ -126,6 +148,8 @@ class IndexService:
                     run_id=run_id,
                     project_id=project.project_id,
                     repo_root_norm=project.repo_root_norm,
+                    repository_identity_hash=active_repository_identity_hash,
+                    repository_binding_generation=project.repo_binding_generation,
                     created_at=finished_at,
                     started_at=started_at,
                     finished_at=finished_at,
@@ -141,14 +165,30 @@ class IndexService:
                     temp_path,
                     project_id=project.project_id,
                     expected_policy_version=self.policy.policy_version,
+                    expected_repo_root_norm=project.repo_root_norm,
+                    expected_repository_identity_hash=active_repository_identity_hash,
+                    expected_repository_binding_generation=(project.repo_binding_generation),
                 )
                 validation_ms = (time.perf_counter_ns() - validation_start) // 1_000_000
                 publication_state = "SEALED"
                 final_candidates = git_candidates(repo_root, self.policy)
                 final_state = capture_repo_state(repo_root, final_candidates, self.policy)
-                if before != final_state or not verify_scan_evidence(repo_root, facts, self.policy):
+                if (
+                    before != final_state
+                    or not final_state.visibility_sealed
+                    or not verify_scan_evidence(repo_root, facts, self.policy)
+                ):
                     raise RepositoryChangedError(
                         "repository changed after snapshot validation and before publication"
+                    )
+                active_project = self.registry.find_project_by_name(project.project_name)
+                if (
+                    active_project is None
+                    or active_project.project_id != project.project_id
+                    or active_project.repo_binding_generation != project.repo_binding_generation
+                ):
+                    raise RepositoryChangedError(
+                        "repository registration changed before snapshot publication"
                     )
                 publication_start = time.perf_counter_ns()
                 preserved = publish_snapshot(temp_path, current_path)
@@ -161,6 +201,7 @@ class IndexService:
                         status="INDEX_SUCCEEDED",
                         indexed_at=finished_at,
                         git_commit=before.head,
+                        binding_generation=project.repo_binding_generation,
                     )
                     bookkeeping["registry"] = "recorded"
                 except ProjectKbError as exc:
@@ -232,6 +273,18 @@ class IndexService:
                     )
                 if all(value == "recorded" for value in bookkeeping.values()):
                     publication_state = "POST_PUBLICATION_RECORDED"
+                canonical_state = self._canonical_publication_state(
+                    current_path,
+                    project_id=project.project_id,
+                    project_name=project.project_name,
+                    run_id=run_id,
+                    snapshot_id=snapshot_id,
+                    repo_root_norm=project.repo_root_norm,
+                    expected_repository_identity_hash=active_repository_identity_hash,
+                    repository_binding_generation=project.repo_binding_generation,
+                )
+                if canonical_state is not _CanonicalPublicationState.ACTIVE:
+                    raise self._publication_state_error(canonical_state)
                 return IndexOutcome(
                     result="success_with_warnings" if warnings else "success",
                     code="INDEX_PUBLISHED_WITH_WARNINGS" if warnings else "INDEX_PUBLISHED",
@@ -250,6 +303,7 @@ class IndexService:
                         "snapshot": {
                             "snapshot_id": snapshot_id,
                             "published": True,
+                            "truth_claim": "CAPTURED_STABLE",
                             "schema_version": SCHEMA_VERSION,
                             "scanner_version": SCANNER_VERSION,
                             "policy_version": self.policy.policy_version,
@@ -296,14 +350,31 @@ class IndexService:
                 self._record_failure(project.project_id, storage_path, run_id, last_error)
                 break
             except ProjectKbError as exc:
-                if exc.details.get("published") is True or (
-                    publication_state == "SEALED"
-                    and self._canonical_run_is_current(
+                if exc.details.get("usable") is False:
+                    publication_state = str(
+                        exc.details.get("publication_state", "PUBLISHED_QUARANTINED")
+                    )
+                    last_error = exc
+                    self._safe_cleanup(temp_path)
+                    break
+                if publication_state == "SEALED":
+                    recovered_state = self._canonical_publication_state(
                         current_path,
                         project_id=project.project_id,
+                        project_name=project.project_name,
                         run_id=run_id,
+                        snapshot_id=snapshot_id,
+                        repo_root_norm=project.repo_root_norm,
+                        expected_repository_identity_hash=active_repository_identity_hash,
+                        repository_binding_generation=project.repo_binding_generation,
                     )
-                ):
+                    if recovered_state is _CanonicalPublicationState.QUARANTINED:
+                        last_error = self._publication_state_error(recovered_state)
+                        self._safe_cleanup(temp_path)
+                        break
+                    if recovered_state is _CanonicalPublicationState.ACTIVE:
+                        publication_state = "PUBLISHED"
+                if exc.details.get("published") is True:
                     publication_state = "PUBLISHED"
                 if publication_state in {"PUBLISHED", "POST_PUBLICATION_RECORDED"}:
                     return self._published_fallback(
@@ -315,6 +386,9 @@ class IndexService:
                         publication_state=publication_state,
                         bookkeeping=bookkeeping,
                         error=exc,
+                        current_path=current_path,
+                        repository_identity_hash=active_repository_identity_hash,
+                        repository_binding_generation=project.repo_binding_generation,
                     )
                 exc.details.setdefault("publication_state", publication_state)
                 last_error = exc
@@ -334,12 +408,22 @@ class IndexService:
                 self._record_failure(project.project_id, storage_path, run_id, last_error)
                 break
             except Exception as exc:
-                if publication_state == "SEALED" and self._canonical_run_is_current(
-                    current_path,
-                    project_id=project.project_id,
-                    run_id=run_id,
-                ):
-                    publication_state = "PUBLISHED"
+                if publication_state == "SEALED":
+                    recovered_state = self._canonical_publication_state(
+                        current_path,
+                        project_id=project.project_id,
+                        project_name=project.project_name,
+                        run_id=run_id,
+                        snapshot_id=snapshot_id,
+                        repo_root_norm=project.repo_root_norm,
+                        expected_repository_identity_hash=active_repository_identity_hash,
+                        repository_binding_generation=project.repo_binding_generation,
+                    )
+                    if recovered_state is _CanonicalPublicationState.ACTIVE:
+                        publication_state = "PUBLISHED"
+                    elif recovered_state is _CanonicalPublicationState.QUARANTINED:
+                        last_error = self._publication_state_error(recovered_state)
+                        break
                 if publication_state in {"PUBLISHED", "POST_PUBLICATION_RECORDED"}:
                     return self._published_fallback(
                         status=status,
@@ -350,6 +434,9 @@ class IndexService:
                         publication_state=publication_state,
                         bookkeeping=bookkeeping,
                         error=exc,
+                        current_path=current_path,
+                        repository_identity_hash=active_repository_identity_hash,
+                        repository_binding_generation=project.repo_binding_generation,
                     )
                 last_error = IndexingError(
                     "Structural index build failed unexpectedly before safe completion.",
@@ -365,22 +452,75 @@ class IndexService:
         assert last_error is not None
         raise last_error
 
-    def _canonical_run_is_current(
+    def _canonical_publication_state(
         self,
         path: Path,
         *,
         project_id: str,
+        project_name: str,
         run_id: str,
-    ) -> bool:
+        snapshot_id: str,
+        repo_root_norm: str,
+        expected_repository_identity_hash: str,
+        repository_binding_generation: str,
+    ) -> _CanonicalPublicationState:
         try:
             meta = validate_snapshot(
                 path,
                 project_id=project_id,
                 expected_policy_version=self.policy.policy_version,
+                expected_repo_root_norm=repo_root_norm,
+                expected_repository_identity_hash=expected_repository_identity_hash,
+                expected_repository_binding_generation=repository_binding_generation,
             )
         except ProjectKbError:
-            return False
-        return meta.get("run_id") == run_id and meta.get("build_status") == "SEALED"
+            return _CanonicalPublicationState.NOT_PUBLISHED
+        if not (
+            meta.get("schema_version") == SCHEMA_VERSION
+            and meta.get("snapshot_id") == snapshot_id
+            and meta.get("run_id") == run_id
+            and meta.get("build_status") == "SEALED"
+        ):
+            return _CanonicalPublicationState.NOT_PUBLISHED
+        active_project = self.registry.find_project_by_name(project_name)
+        if active_project is None:
+            return _CanonicalPublicationState.QUARANTINED
+        active_identity_hash = repository_identity_hash(
+            active_project.repo_root_norm,
+            active_project.repo_fingerprint_json,
+        )
+        if (
+            active_project.project_id != project_id
+            or active_project.repo_root_norm != repo_root_norm
+            or active_identity_hash != expected_repository_identity_hash
+            or active_project.repo_binding_generation != repository_binding_generation
+        ):
+            return _CanonicalPublicationState.QUARANTINED
+        return _CanonicalPublicationState.ACTIVE
+
+    @staticmethod
+    def _publication_state_error(state: _CanonicalPublicationState) -> IndexingError:
+        publication_state = (
+            "PUBLISHED_QUARANTINED"
+            if state is _CanonicalPublicationState.QUARANTINED
+            else "PUBLICATION_NOT_CONFIRMED"
+        )
+        return IndexingError(
+            (
+                "The snapshot was published physically but is not active for the "
+                "current repository binding."
+            )
+            if state is _CanonicalPublicationState.QUARANTINED
+            else "The canonical snapshot publication could not be confirmed safely.",
+            code="SNAPSHOT_REBUILD_REQUIRED"
+            if state is _CanonicalPublicationState.QUARANTINED
+            else "INDEX_PUBLICATION_NOT_CONFIRMED",
+            details={
+                "published": state is _CanonicalPublicationState.QUARANTINED,
+                "usable": False,
+                "publication_state": publication_state,
+            },
+        )
 
     def _published_fallback(
         self,
@@ -393,11 +533,27 @@ class IndexService:
         publication_state: str,
         bookkeeping: dict[str, str],
         error: Exception,
+        current_path: Path,
+        repository_identity_hash: str,
+        repository_binding_generation: str,
     ) -> IndexOutcome:
+        canonical_state = self._canonical_publication_state(
+            current_path,
+            project_id=project.project_id,
+            project_name=project.project_name,
+            run_id=run_id,
+            snapshot_id=snapshot_id,
+            repo_root_norm=project.repo_root_norm,
+            expected_repository_identity_hash=repository_identity_hash,
+            repository_binding_generation=repository_binding_generation,
+        )
+        if canonical_state is not _CanonicalPublicationState.ACTIVE:
+            raise self._publication_state_error(canonical_state)
         warning = {
             "code": "POST_PUBLICATION_ANCILLARY_FAILURE",
             "message": (
-                "The snapshot is current, but later ancillary processing did not complete."
+                "The snapshot was published successfully, but later ancillary "
+                "processing did not complete."
             ),
             "details": {
                 "error_type": type(error).__name__,
@@ -418,7 +574,11 @@ class IndexService:
                     "effective_mode": "full",
                     "status": "success",
                 },
-                "snapshot": {"snapshot_id": snapshot_id, "published": True},
+                "snapshot": {
+                    "snapshot_id": snapshot_id,
+                    "published": True,
+                    "truth_claim": "CAPTURED_STABLE",
+                },
                 "counts": {},
                 "timings": {},
                 "previous_snapshot": {"preserved": False},

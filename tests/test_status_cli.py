@@ -1,12 +1,11 @@
 import json
-import os
 import shutil
 import sqlite3
-import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _git_support import git as run_test_git
 from typer.testing import CliRunner
 
 from project_kb.cli.app import app
@@ -78,6 +77,22 @@ def test_status_resolves_explicit_project_name_and_returns_complete_contract(
         "current_git_commit": None,
         "is_current": False,
         "reason": "snapshot_not_created",
+        "availability": "MISSING",
+        "compatibility": "NOT_APPLICABLE",
+        "currentness": "UNVERIFIED",
+        "truth_claim": None,
+        "verification_mode": None,
+        "verified_at": None,
+        "verification_duration_ms": None,
+        "verification_timings_ms": {},
+        "verification_attempts": 0,
+        "mismatch_paths": [],
+        "deltas": [],
+        "diagnostics": [],
+        "exclusions": [],
+        "verification_scope": {},
+        "proof_contract_version": None,
+        "verifier_version": None,
     }
     assert payload["data"]["availability"] == {
         "can_use_project": True,
@@ -558,22 +573,4 @@ def _initialize_existing_repo(repo_root: Path, message: str) -> None:
 
 
 def _run_git(repo_root: Path, *args: str) -> None:
-    git_env = os.environ.copy()
-    git_env.update(
-        {
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_AUTHOR_NAME": "Project KB Tests",
-            "GIT_AUTHOR_EMAIL": "project-kb-tests@example.invalid",
-            "GIT_COMMITTER_NAME": "Project KB Tests",
-            "GIT_COMMITTER_EMAIL": "project-kb-tests@example.invalid",
-        }
-    )
-    subprocess.run(
-        ["git", *args],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=git_env,
-    )
+    run_test_git(repo_root, *args, text=True)

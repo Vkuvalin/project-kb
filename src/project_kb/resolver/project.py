@@ -1,5 +1,8 @@
 """Project status resolution orchestration."""
 
+import hashlib
+import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,13 +27,25 @@ from project_kb.resolver.models import (
     StorageCheck,
 )
 from project_kb.resolver.repo_check import check_registered_repository
+from project_kb.resolver.repo_identity import (
+    RepositoryFingerprint,
+    build_repository_fingerprint,
+    compare_repository_fingerprints,
+    repository_identity_hash,
+)
 from project_kb.resolver.state import (
     STATE_POLICIES,
     ProjectState,
     recommended_action_for,
 )
 from project_kb.resolver.storage_check import check_project_storage
-from project_kb.snapshot.database import validate_snapshot
+from project_kb.snapshot.currentness import (
+    CurrentnessState,
+    RepositoryBindingObservation,
+    VerificationMode,
+    verify_snapshot_currentness,
+)
+from project_kb.snapshot.database import SCHEMA_VERSION, validate_snapshot
 from project_kb.storage.home import resolve_home
 
 
@@ -42,12 +57,24 @@ class ProjectStatusService:
         self.working_directory = (working_directory or Path.cwd()).resolve()
         self.registry = RegistryService(home=self.home)
 
-    def status(self, project_name: str | None = None) -> StatusOutcome:
+    def status(
+        self,
+        project_name: str | None = None,
+        *,
+        verification_mode: VerificationMode | str | None = None,
+    ) -> StatusOutcome:
+        mode = VerificationMode(verification_mode) if verification_mode is not None else None
+        if mode is VerificationMode.FAST:
+            return self._fast_verification_removed(project_name)
         if project_name is not None:
-            return self._status_by_name(project_name)
-        return self._status_by_current_directory()
+            return self._status_by_name(project_name, mode)
+        return self._status_by_current_directory(mode)
 
-    def _status_by_name(self, project_name: str) -> StatusOutcome:
+    def _status_by_name(
+        self,
+        project_name: str,
+        verification_mode: VerificationMode | None,
+    ) -> StatusOutcome:
         resolution = Resolution(
             mode="name",
             status="failed",
@@ -93,9 +120,13 @@ class ProjectStatusService:
                 resolved_repo_root=project.repo_root,
                 resolved_by="project_name",
             ),
+            verification_mode,
         )
 
-    def _status_by_current_directory(self) -> StatusOutcome:
+    def _status_by_current_directory(
+        self,
+        verification_mode: VerificationMode | None,
+    ) -> StatusOutcome:
         try:
             git_root = resolve_git_root(self.working_directory)
         except ProjectKbError:
@@ -175,13 +206,16 @@ class ProjectStatusService:
                 resolved_repo_root=str(git_root),
                 resolved_by="repo_root",
             ),
+            verification_mode,
         )
 
     def _status_resolved_project(
         self,
         project: ProjectRecord,
         resolution: Resolution,
+        verification_mode: VerificationMode | None,
     ) -> StatusOutcome:
+        snapshot_currentness = CurrentnessState.UNVERIFIED
         try:
             repo_evaluation = check_registered_repository(project, registry=self.registry)
         except RegistryOperationError as error:
@@ -213,7 +247,16 @@ class ProjectStatusService:
             snapshot_present = False
         else:
             try:
-                snapshot_meta = validate_snapshot(snapshot_path, project_id=project.project_id)
+                snapshot_meta = validate_snapshot(
+                    snapshot_path,
+                    project_id=project.project_id,
+                    expected_repo_root_norm=project.repo_root_norm,
+                    expected_repository_identity_hash=repository_identity_hash(
+                        project.repo_root_norm,
+                        project.repo_fingerprint_json,
+                    ),
+                    expected_repository_binding_generation=(project.repo_binding_generation),
+                )
             except SnapshotQueryError as error:
                 state = (
                     ProjectState.SNAPSHOT_REBUILD_REQUIRED
@@ -226,7 +269,43 @@ class ProjectStatusService:
                     project=project,
                     repo_check=repo_evaluation.check,
                     storage_check=storage_check,
+                    snapshot_check=SnapshotCheck.not_checked(
+                        "snapshot_repository_binding_mismatch"
+                        if error.details.get("snapshot_classification")
+                        == "wrong_repository_binding"
+                        else "snapshot_validation_failed",
+                        availability=(
+                            "INCOMPATIBLE"
+                            if error.code == "SNAPSHOT_REBUILD_REQUIRED"
+                            else "CORRUPT"
+                        ),
+                        compatibility=(
+                            "INCOMPATIBLE"
+                            if error.code == "SNAPSHOT_REBUILD_REQUIRED"
+                            else "NOT_CHECKED"
+                        ),
+                    ),
                     error_details=error.details,
+                )
+            if (
+                snapshot_meta["schema_version"] != SCHEMA_VERSION
+                and project.snapshot_binding_generation != project.repo_binding_generation
+            ):
+                return self._problem(
+                    ProjectState.SNAPSHOT_REBUILD_REQUIRED,
+                    resolution=resolution,
+                    project=project,
+                    repo_check=repo_evaluation.check,
+                    storage_check=storage_check,
+                    snapshot_check=SnapshotCheck.not_checked(
+                        "snapshot_repository_binding_mismatch",
+                        availability="INCOMPATIBLE",
+                        compatibility="INCOMPATIBLE",
+                    ),
+                    error_details={
+                        "snapshot_classification": "wrong_repository_binding",
+                        "reason": "registration_generation_changed_since_legacy_snapshot",
+                    },
                 )
             registry_reconciled = (
                 project.last_status == "INDEX_SUCCEEDED"
@@ -240,19 +319,141 @@ class ProjectStatusService:
                 state = ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE
             else:
                 state = ProjectState.SNAPSHOT_PRESENT_REGISTRY_WARNING
+            compatibility = (
+                "COMPATIBLE" if snapshot_meta["schema_version"] == SCHEMA_VERSION else "LEGACY_V1"
+            )
             snapshot_check = SnapshotCheck(
                 status="valid_when_published_currentness_unverified",
                 snapshot_id=snapshot_meta["snapshot_id"],
                 indexed_at=snapshot_meta["created_at"],
                 git_commit_at_index=snapshot_meta["git_head"],
                 current_git_commit=None,
-                is_current=False,
+                is_current=(False if snapshot_meta["schema_version"] != SCHEMA_VERSION else None),
                 reason=(
                     "present_working_tree_not_compared"
                     if state is ProjectState.SNAPSHOT_PRESENT_UNVERIFIED
                     else "snapshot_available_with_registry_outcome_warning"
                 ),
+                availability="AVAILABLE",
+                compatibility=compatibility,
+                truth_claim=(
+                    "CAPTURED_STABLE" if snapshot_meta["schema_version"] == SCHEMA_VERSION else None
+                ),
             )
+            if verification_mode is not None:
+                if snapshot_meta["schema_version"] != SCHEMA_VERSION:
+                    state = ProjectState.SNAPSHOT_LEGACY_REINDEX_REQUIRED
+                    snapshot_check = SnapshotCheck(
+                        status="legacy_snapshot_currentness_unavailable",
+                        snapshot_id=snapshot_meta["snapshot_id"],
+                        indexed_at=snapshot_meta["created_at"],
+                        git_commit_at_index=snapshot_meta["git_head"],
+                        current_git_commit=None,
+                        is_current=False,
+                        reason="legacy_v1_reindex_required_for_currentness",
+                        availability="AVAILABLE",
+                        compatibility="LEGACY_V1",
+                        currentness=CurrentnessState.UNVERIFIED.value,
+                        verification_mode=verification_mode.value,
+                    )
+                else:
+                    expected_binding = (
+                        project.repo_root_norm,
+                        repository_identity_hash(
+                            project.repo_root_norm,
+                            project.repo_fingerprint_json,
+                        ),
+                        project.repo_binding_generation,
+                    )
+
+                    def active_binding() -> RepositoryBindingObservation:
+                        return self._repository_binding_observation(project)
+
+                    verification = verify_snapshot_currentness(
+                        snapshot_path,
+                        repo_root=Path(project.repo_root),
+                        snapshot_meta=snapshot_meta,
+                        mode=verification_mode,
+                        active_binding=active_binding,
+                        expected_binding=expected_binding,
+                    )
+                    snapshot_currentness = verification.state
+                    snapshot_check = SnapshotCheck(
+                        status="currentness_verification_completed",
+                        snapshot_id=snapshot_meta["snapshot_id"],
+                        indexed_at=snapshot_meta["created_at"],
+                        git_commit_at_index=snapshot_meta["git_head"],
+                        current_git_commit=verification.current_git_commit,
+                        is_current=None,
+                        reason=verification.reason,
+                        availability="AVAILABLE",
+                        compatibility="COMPATIBLE",
+                        currentness=verification.state.value,
+                        truth_claim=(
+                            "CURRENT_AT_VERIFIED_TIME"
+                            if verification.state is CurrentnessState.CURRENT
+                            else "CAPTURED_STABLE"
+                        ),
+                        verification_mode=verification.mode.value,
+                        verified_at=verification.verified_at,
+                        verification_duration_ms=verification.duration_ms,
+                        verification_timings_ms=verification.timings_ms,
+                        verification_attempts=verification.attempts,
+                        mismatch_paths=verification.mismatch_paths,
+                        deltas=verification.deltas,
+                        diagnostics=verification.diagnostics,
+                        exclusions=verification.exclusions,
+                        verification_scope=json.loads(snapshot_meta["verification_scope_json"]),
+                        proof_contract_version=snapshot_meta["proof_contract_version"],
+                        verifier_version=snapshot_meta["verifier_version"],
+                    )
+                    if verification.binding_status == "BINDING_MISMATCH":
+                        active_project = self.registry.find_project_by_name(project.project_name)
+                        return self._problem(
+                            ProjectState.SNAPSHOT_REBUILD_REQUIRED,
+                            resolution=resolution,
+                            project=active_project or project,
+                            repo_check=repo_evaluation.check,
+                            storage_check=storage_check,
+                            snapshot_check=replace(
+                                snapshot_check,
+                                availability="INCOMPATIBLE",
+                                compatibility="INCOMPATIBLE",
+                            ),
+                            error_details={
+                                "snapshot_classification": "wrong_repository_binding",
+                                "reason": "binding_changed_during_verification",
+                            },
+                        )
+                    if verification.binding_status == "IDENTITY_MISMATCH":
+                        active_project = self.registry.find_project_by_name(project.project_name)
+                        if active_project is not None:
+                            identity_evaluation = check_registered_repository(
+                                active_project,
+                                registry=self.registry,
+                            )
+                            if identity_evaluation.state is not None:
+                                return self._problem(
+                                    identity_evaluation.state,
+                                    resolution=resolution,
+                                    project=identity_evaluation.project,
+                                    repo_check=identity_evaluation.check,
+                                    storage_check=storage_check,
+                                    snapshot_check=snapshot_check,
+                                    error_details={
+                                        "reason": "identity_changed_during_verification"
+                                    },
+                                )
+                        state = ProjectState.SNAPSHOT_CHANGED_DURING_CHECK
+                    if verification.state is CurrentnessState.CURRENT:
+                        if state is ProjectState.SNAPSHOT_PRESENT_UNVERIFIED:
+                            state = ProjectState.OK
+                    elif verification.state is CurrentnessState.STALE:
+                        state = ProjectState.SNAPSHOT_STALE
+                    elif verification.state is CurrentnessState.CHANGED_DURING_CHECK:
+                        state = ProjectState.SNAPSHOT_CHANGED_DURING_CHECK
+                    elif verification.state is CurrentnessState.ERROR:
+                        state = ProjectState.SNAPSHOT_VERIFICATION_ERROR
             snapshot_present = True
         policy = STATE_POLICIES[state]
         action = recommended_action_for(
@@ -278,11 +479,74 @@ class ProjectStatusService:
                 repo_valid=True,
                 storage_valid=True,
                 snapshot_present=snapshot_present,
-                snapshot_current=False,
+                snapshot_currentness=snapshot_currentness,
             ),
             requires_user_action=policy.requires_user_action,
             recommended_action=action,
             error=None,
+        )
+
+    def _fast_verification_removed(self, project_name: str | None) -> StatusOutcome:
+        return self._problem(
+            ProjectState.FAST_VERIFICATION_REMOVED,
+            resolution=Resolution(
+                mode="name" if project_name is not None else "current_directory",
+                status="verification_removed",
+                project_name_input=project_name,
+                working_directory=str(self.working_directory),
+                resolved_repo_root=None,
+                resolved_by=None,
+            ),
+            snapshot_check=SnapshotCheck(
+                status="verification_removed",
+                snapshot_id=None,
+                indexed_at=None,
+                git_commit_at_index=None,
+                current_git_commit=None,
+                is_current=None,
+                reason="fast_verification_removed",
+                availability="NOT_CHECKED",
+                compatibility="NOT_CHECKED",
+                currentness=CurrentnessState.UNVERIFIED.value,
+                verification_mode=VerificationMode.FAST.value,
+            ),
+        )
+
+    def _repository_binding_observation(
+        self,
+        project: ProjectRecord,
+    ) -> RepositoryBindingObservation:
+        current = self.registry.find_project_by_name(project.project_name)
+        if current is None or current.project_id != project.project_id:
+            return RepositoryBindingObservation(
+                repo_root_norm="<registration-missing>",
+                repository_identity_hash="<registration-missing>",
+                repository_binding_generation="<registration-missing>",
+                live_identity_token="<registration-missing>",
+                live_identity_matches=False,
+                live_identity_reason="registration_missing",
+            )
+        if current.repo_fingerprint_json is None:
+            raise ValueError("active repository fingerprint is unavailable")
+        stored_fingerprint = RepositoryFingerprint.from_json(current.repo_fingerprint_json)
+        repo_root = Path(current.repo_root)
+        live_fingerprint = build_repository_fingerprint(repo_root)
+        comparison = compare_repository_fingerprints(
+            stored_fingerprint,
+            live_fingerprint,
+            repo_root=repo_root,
+        )
+        live_identity_token = hashlib.sha256(live_fingerprint.to_json().encode("utf-8")).hexdigest()
+        return RepositoryBindingObservation(
+            repo_root_norm=current.repo_root_norm,
+            repository_identity_hash=repository_identity_hash(
+                current.repo_root_norm,
+                current.repo_fingerprint_json,
+            ),
+            repository_binding_generation=current.repo_binding_generation,
+            live_identity_token=live_identity_token,
+            live_identity_matches=comparison.matches,
+            live_identity_reason=comparison.reason,
         )
 
     def _registry_problem(
@@ -314,6 +578,7 @@ class ProjectStatusService:
         project: ProjectRecord | None = None,
         repo_check: RepoCheck | None = None,
         storage_check: StorageCheck | None = None,
+        snapshot_check: SnapshotCheck | None = None,
         code: str | None = None,
         message: str | None = None,
         exit_code: int | None = None,
@@ -354,7 +619,7 @@ class ProjectStatusService:
             project=project,
             repo_check=repo_check or RepoCheck.not_checked("project_not_available"),
             storage_check=storage_check or StorageCheck.not_checked("repository_not_valid"),
-            snapshot_check=SnapshotCheck.not_checked("project_not_usable"),
+            snapshot_check=snapshot_check or SnapshotCheck.not_checked("project_not_usable"),
             availability=Availability.unavailable(),
             requires_user_action=policy.requires_user_action,
             recommended_action=action,
@@ -369,7 +634,7 @@ def _availability(
     repo_valid: bool,
     storage_valid: bool,
     snapshot_present: bool,
-    snapshot_current: bool,
+    snapshot_currentness: CurrentnessState,
 ) -> Availability:
     context = GateContext(
         registry_available=registry_available,
@@ -377,7 +642,7 @@ def _availability(
         repo_valid=repo_valid,
         storage_valid=storage_valid,
         snapshot_present=snapshot_present,
-        snapshot_current=snapshot_current,
+        snapshot_currentness=snapshot_currentness.value,
     )
     project_requirements = (
         GateRequirement.REGISTRY_AVAILABLE,

@@ -10,9 +10,12 @@ Current safety rules:
   Windows, or `~/.project-kb` as the fallback.
 - `registry.sqlite` is allowed and is the source of truth for project
   registration and lightweight repository fingerprint metadata.
-- Opening an existing supported registry may perform the additive v1-to-v2
-  schema migration. A valid legacy record may receive a one-time fingerprint
-  initialization and registry event.
+- Opening an existing supported registry may perform an additive v1/v2-to-v3
+  schema migration. A valid legacy record receives binding-generation metadata
+  and one migration event. Migration uses durable historical relink and
+  index-outcome ordering; a relink without a confirmed later successful index,
+  ambiguous ordering, incomplete history, or an existing relink-required marker
+  remains fail-closed without labeling valid legacy data corrupt.
 - A status lookup does not create a missing Project KB home or registry and
   does not create or repair per-project storage.
 - Registry files and managed project-storage paths must not resolve through
@@ -30,11 +33,25 @@ Current safety rules:
   only at `<PROJECT_KB_HOME>/projects/<project_id>`; mismatched registry paths
   must be refused.
 - Do not delete or modify source repositories during unregister.
-- Repository identity checks may run bounded local Git metadata commands for
-  Git-root/common-dir resolution, registration HEAD, and root commits. They
-  must not fetch, contact remotes, or scan working-tree file contents.
+- Repository identity, scanner, status, and currentness checks may run only
+  allow-listed local read-only Git observations through the shared runner. The
+  runner accepts exact argument profiles, removes inherited `GIT_*` controls,
+  then applies no-system/no-global config, local `core.fsmonitor`, paging,
+  lazy-fetch, and optional-lock controls; the local origin read does not follow
+  config includes. These checks must not fetch, contact remotes, execute
+  repository hooks/helpers, or create or modify files in the source repository's
+  live index, worktree Git directory, or common Git directory. This prohibition
+  includes `sharedindex.*`, index lock/sidecar files, and repository config. The
+  only write-shaped Git operation is exact staged-entry population of an
+  internally created and automatically removed temporary `GIT_INDEX_FILE` under
+  managed project storage. That command applies a non-persistent
+  `core.splitIndex=false` override so repository-local split-index configuration
+  cannot redirect temporary-index storage back into the live Git common
+  directory.
 - Origin URLs may be read locally only long enough to compute a SHA-256 hash.
-  Raw origin URLs must not be stored, logged, or returned.
+  Raw origin URLs must not be stored, logged, or returned. A changed origin hash
+  is a repository-identity mismatch; verification samples the bounded live
+  fingerprint locally before and after proof work and never fetches.
 - Structural indexing starts from Git tracked files plus untracked non-ignored
   files. V0 may additionally check only exact roots from a universal technical
   prune list. Git-provided paths and spelling take priority over policy
@@ -45,6 +62,8 @@ Current safety rules:
 - Hard-secret path policy is applied before content access. Secret content is
   not opened, decoded, or content-hashed; only safe relative-path and metadata
   classification may be retained when the path enters candidate population.
+  Strong currentness verification treats hard-secret content as an explicit
+  exclusion and must not open or hash it.
   Ignored .env files commonly remain absent because V0 does not enumerate
   ignored files. Real .env variants and exact credential/token basenames are
   hard-secret, while .env.example, .env.sample, .env.template, and .env.dist
@@ -70,9 +89,10 @@ Current safety rules:
 - Source text may be read transiently for hashing and structural extraction but
   is not duplicated into SQLite. The snapshot stores hashes, line counts,
   positions, and derived facts, not full content or content history.
-- Python extraction uses the standard-library AST parser. Target modules,
+- Python extraction uses the standard-library AST parser. Indexing and
+  currentness verification never import target modules. Target modules,
   scripts, tests, hooks, migrations, and application services must never be
-  imported or executed by indexing.
+  imported or executed.
 - A temporary snapshot is fully built and sealed before validation:
   snapshot_meta.build_status is SEALED and the linked index run is
   BUILD_SUCCEEDED. Final candidate and processed-object evidence verification
@@ -82,14 +102,48 @@ Current safety rules:
   replacement. Pre-publication failures preserve the previous snapshot.
 - After publication, registry and run-file bookkeeping are reported separately
   as recorded, not_recorded, or unknown. Incomplete or uncertain bookkeeping
-  returns warnings, keeps the snapshot queryable, and must not record
-  INDEX_FAILED for the published snapshot.
+  returns warnings and keeps the snapshot queryable only when root, identity
+  hash, binding generation, v2 run/snapshot identity, and active registry
+  binding still match. A snapshot physically replaced before a concurrent
+  relink is quarantined/rebuild-required and is not reported as usable success.
+- Post-publication currentness verification is source-read-only and opt-in.
+  Strong mode uses the visibility-neutral observation boundary: one stable live
+  Git staged-entry projection is rebuilt in an isolated temporary index under
+  managed project storage without assume-unchanged or skip-worktree bits; the
+  normalized live paths are retained as diagnostics before candidate and status
+  observation. Live raw-index path/content/file-identity/timestamp
+  evidence plus logical staged-entry and visibility projections seal the capture. Stable
+  visibility flags are `UNVERIFIED`; generation or
+  visibility instability retries and then fails closed rather than yielding
+  `CURRENT`, while a hidden write remains visible through the neutral view even
+  if the live flag undergoes ABA. Strong mode compares
+  the v2 proof manifest through scanner-owned safe reads and a bounded two-pass
+  proof seal; stable raw whole-repository status is diagnostic rather than an
+  independent semantic stale predicate. Every strong check finishes
+  with a terminal candidate, repository-state, binding, live-identity, and
+  scanner-owned object proof, including clean-to-clean HEAD changes and dirty
+  same-status mutations. Hard-secret and pruned content remains explicitly
+  excluded, not verified. An unstable observation retries once, then reports
+  CHANGED_DURING_CHECK rather than guessing CURRENT. Every completed strong v2
+  verification outcome includes UTC `verified_at`; `CURRENT` is explicitly
+  `CURRENT_AT_VERIFIED_TIME`. Default semantic-v2 status is `UNVERIFIED` with
+  `CAPTURED_STABLE`. The removed fast token performs no repository, snapshot, or
+  registry inspection or mutation and includes neither timestamp nor timing.
+  Unexecuted valid-v1 strong verification likewise fabricates neither.
 - Validation checks SQLite integrity, required tables/columns/indexes, one
   metadata row, its exact run_id, exactly one matching publication run, matching
   project and published snapshot IDs, compatible sealed/build-success states,
   foreign keys, cross-table invariants, and scanner/policy/extractor
-  compatibility. Readable incompatible snapshots require a full rebuild rather
-  than an in-place migration.
+  compatibility. Version identification precedes v1/v2 manifest checks. V2
+  additionally validates active repository binding, proof/file consistency,
+  source-root/module mapping, verifier contracts, and snapshot-bound occurrence
+  identity. Readable incompatible or wrong-binding snapshots require a full
+  rebuild rather than an in-place migration.
+- Relink never deletes or rewrites the canonical snapshot in place. Every
+  explicit relink rotates the registry binding generation; the snapshot
+  generation remains unchanged across failed reindex attempts, so trusted facts
+  stay unavailable until a full source reindex publishes and records the active
+  binding.
 - Do not call external services, model providers, embedding providers, or LLMs.
 - Tests must redirect `PROJECT_KB_HOME` to a temporary directory.
 - Tests must not write to real `%LOCALAPPDATA%`.

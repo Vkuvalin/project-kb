@@ -34,7 +34,7 @@ class GateContext:
     repo_valid: bool = False
     storage_valid: bool = False
     snapshot_present: bool = False
-    snapshot_current: bool = False
+    snapshot_currentness: str = "UNVERIFIED"
     user_approval: bool = False
 
 

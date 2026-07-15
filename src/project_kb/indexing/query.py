@@ -3,8 +3,9 @@
 from pathlib import Path
 from typing import Any
 
-from project_kb.errors import ProjectStatusError
+from project_kb.errors import ProjectStatusError, SnapshotQueryError
 from project_kb.resolver.project import ProjectStatusService
+from project_kb.resolver.repo_identity import repository_identity_hash
 from project_kb.resolver.state import ProjectState
 from project_kb.snapshot.database import SnapshotReader
 
@@ -43,8 +44,49 @@ class QueryService:
                 recommended_action=status.recommended_action.code,
                 details={"project_state": status.project_state.value},
             )
+        expected_project = status.project
+
+        def active_binding() -> tuple[str, str, str]:
+            current = self.status_service.registry.find_project_by_name(
+                expected_project.project_name
+            )
+            if current is None or current.project_id != expected_project.project_id:
+                raise SnapshotQueryError(
+                    "Project registration changed during snapshot access.",
+                    code="SNAPSHOT_REBUILD_REQUIRED",
+                    details={
+                        "snapshot_classification": "wrong_repository_binding",
+                        "reason": "registration_changed_during_query",
+                    },
+                )
+            if current.repo_binding_generation != expected_project.repo_binding_generation:
+                raise SnapshotQueryError(
+                    "Project repository binding changed during snapshot access.",
+                    code="SNAPSHOT_REBUILD_REQUIRED",
+                    details={
+                        "snapshot_classification": "wrong_repository_binding",
+                        "reason": "registration_generation_changed_during_query",
+                    },
+                )
+            return (
+                current.repo_root_norm,
+                repository_identity_hash(
+                    current.repo_root_norm,
+                    current.repo_fingerprint_json,
+                ),
+                current.repo_binding_generation,
+            )
+
         return status, SnapshotReader(
-            Path(status.project.storage_path) / "kb.sqlite", project_id=status.project.project_id
+            Path(status.project.storage_path) / "kb.sqlite",
+            project_id=status.project.project_id,
+            expected_repo_root_norm=status.project.repo_root_norm,
+            expected_repository_identity_hash=repository_identity_hash(
+                status.project.repo_root_norm,
+                status.project.repo_fingerprint_json,
+            ),
+            expected_repository_binding_generation=(status.project.repo_binding_generation),
+            active_binding=active_binding,
         )
 
     @staticmethod
@@ -80,7 +122,10 @@ class QueryService:
                 "policy_version": reader.meta["policy_version"],
                 "extractor_versions": reader.meta["extractor_versions"],
                 "compatibility": reader.meta["compatibility"],
-                "currentness": "unverified",
+                "availability": status.snapshot_check.availability,
+                "currentness": status.snapshot_check.currentness,
+                "truth_claim": status.snapshot_check.truth_claim,
+                "verification_mode": status.snapshot_check.verification_mode,
             },
             "query_warnings": warnings,
         }

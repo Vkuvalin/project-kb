@@ -15,7 +15,6 @@ REQUIREMENT_FIELDS = {
     GateRequirement.REPO_VALID: "repo_valid",
     GateRequirement.STORAGE_VALID: "storage_valid",
     GateRequirement.SNAPSHOT_PRESENT: "snapshot_present",
-    GateRequirement.SNAPSHOT_CURRENT: "snapshot_current",
     GateRequirement.USER_APPROVAL: "user_approval",
 }
 
@@ -31,7 +30,7 @@ def evaluate_gate(
     failed = tuple(
         requirement
         for requirement in requirements
-        if not bool(getattr(context, REQUIREMENT_FIELDS[requirement]))
+        if not _requirement_satisfied(context, requirement)
     )
     allowed = not failed
     return GateResult(
@@ -42,3 +41,12 @@ def evaluate_gate(
         requires_user_approval=GateRequirement.USER_APPROVAL in failed,
         recommended_action=recommended_action if failed else None,
     )
+
+
+def _requirement_satisfied(
+    context: GateContext,
+    requirement: GateRequirement,
+) -> bool:
+    if requirement is GateRequirement.SNAPSHOT_CURRENT:
+        return context.snapshot_currentness == "CURRENT"
+    return bool(getattr(context, REQUIREMENT_FIELDS[requirement]))

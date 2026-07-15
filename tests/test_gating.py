@@ -62,3 +62,24 @@ def test_gate_allows_satisfied_project_requirements() -> None:
     assert result.allowed is True
     assert result.failed_requirements == ()
     assert result.recommended_action is None
+
+
+def test_snapshot_gate_consumes_authoritative_currentness_state_not_boolean() -> None:
+    requirements = (GateRequirement.SNAPSHOT_CURRENT,)
+
+    current = evaluate_gate(
+        GateContext(snapshot_currentness="CURRENT"),
+        requirements,
+    )
+    stale = evaluate_gate(
+        GateContext(snapshot_currentness="STALE"),
+        requirements,
+    )
+    removed_fast = evaluate_gate(
+        GateContext(snapshot_currentness="UNVERIFIED"),
+        requirements,
+    )
+
+    assert current.allowed is True
+    assert stale.allowed is False
+    assert removed_fast.allowed is False

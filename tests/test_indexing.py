@@ -2,10 +2,10 @@ import contextlib
 import json
 import os
 import sqlite3
-import subprocess
 from pathlib import Path
 
 import pytest
+from _git_support import git as run_test_git
 from typer.testing import CliRunner
 
 from project_kb.cli.app import app
@@ -396,6 +396,4 @@ class Child(Base):
 
 
 def _git(repo: Path, *args: str) -> None:
-    environment = os.environ.copy()
-    environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=environment)
+    run_test_git(repo, *args)

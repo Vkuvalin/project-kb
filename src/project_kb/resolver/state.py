@@ -13,13 +13,19 @@ from project_kb.exit_codes import (
     REPOSITORY_MISMATCH,
     SNAPSHOT_UNAVAILABLE,
     STORAGE_STATE_ERROR,
+    USAGE_ERROR,
 )
 from project_kb.gating.models import RecommendedAction
 
 
 class ProjectState(StrEnum):
+    FAST_VERIFICATION_REMOVED = "FAST_VERIFICATION_REMOVED"
     REGISTERED_NO_SNAPSHOT = "REGISTERED_NO_SNAPSHOT"
     SNAPSHOT_PRESENT_UNVERIFIED = "SNAPSHOT_PRESENT_UNVERIFIED"
+    SNAPSHOT_LEGACY_REINDEX_REQUIRED = "SNAPSHOT_LEGACY_REINDEX_REQUIRED"
+    SNAPSHOT_STALE = "SNAPSHOT_STALE"
+    SNAPSHOT_CHANGED_DURING_CHECK = "SNAPSHOT_CHANGED_DURING_CHECK"
+    SNAPSHOT_VERIFICATION_ERROR = "SNAPSHOT_VERIFICATION_ERROR"
     SNAPSHOT_PRESENT_REGISTRY_WARNING = "SNAPSHOT_PRESENT_REGISTRY_WARNING"
     LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE = "LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE"
     SNAPSHOT_REBUILD_REQUIRED = "SNAPSHOT_REBUILD_REQUIRED"
@@ -46,6 +52,18 @@ class StatePolicy:
 
 
 STATE_POLICIES = {
+    ProjectState.FAST_VERIFICATION_REMOVED: StatePolicy(
+        code="FAST_VERIFICATION_REMOVED",
+        message=(
+            "Fast snapshot verification has been removed; use authoritative "
+            "strong verification or create a new full capture."
+        ),
+        exit_code=USAGE_ERROR,
+        ok=False,
+        result="blocked",
+        has_error=True,
+        requires_user_action=True,
+    ),
     ProjectState.REGISTERED_NO_SNAPSHOT: StatePolicy(
         code="REGISTERED_NO_SNAPSHOT",
         message="Project is registered and valid, but no snapshot has been created.",
@@ -66,6 +84,45 @@ STATE_POLICIES = {
         result="success",
         has_error=False,
         requires_user_action=False,
+    ),
+    ProjectState.SNAPSHOT_LEGACY_REINDEX_REQUIRED: StatePolicy(
+        code="SNAPSHOT_LEGACY_REINDEX_REQUIRED",
+        message=(
+            "The valid legacy snapshot remains readable, but v2 currentness "
+            "verification requires a full reindex."
+        ),
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_STALE: StatePolicy(
+        code="SNAPSHOT_STALE",
+        message="The published snapshot has a concrete repository delta.",
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_CHANGED_DURING_CHECK: StatePolicy(
+        code="SNAPSHOT_CHANGED_DURING_CHECK",
+        message="The repository changed while snapshot currentness was being verified.",
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
+    ),
+    ProjectState.SNAPSHOT_VERIFICATION_ERROR: StatePolicy(
+        code="SNAPSHOT_VERIFICATION_ERROR",
+        message="Snapshot currentness verification could not be completed safely.",
+        exit_code=OK,
+        ok=True,
+        result="success_with_warnings",
+        has_error=False,
+        requires_user_action=True,
     ),
     ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE: StatePolicy(
         code="LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE",
@@ -204,6 +261,19 @@ def recommended_action_for(
             requires_user_approval=False,
             reason="project_name_invalid",
         )
+    if state is ProjectState.FAST_VERIFICATION_REMOVED:
+        command = (
+            f"pkb status {name} --verify strong --json"
+            if project_name is not None
+            else "pkb status --verify strong --json"
+        )
+        return RecommendedAction(
+            code="USE_STRONG_VERIFICATION_OR_FULL_CAPTURE",
+            command=command,
+            available=True,
+            requires_user_approval=False,
+            reason="fast_verification_removed",
+        )
 
     actions = {
         ProjectState.REGISTERED_NO_SNAPSHOT: RecommendedAction(
@@ -219,6 +289,34 @@ def recommended_action_for(
             available=True,
             requires_user_approval=False,
             reason="snapshot_valid_when_published_currentness_unverified",
+        ),
+        ProjectState.SNAPSHOT_LEGACY_REINDEX_REQUIRED: RecommendedAction(
+            code="REINDEX_FOR_V2_CURRENTNESS",
+            command=f"pkb index {name} --full --json",
+            available=True,
+            requires_user_approval=False,
+            reason="legacy_v1_reindex_required_for_currentness",
+        ),
+        ProjectState.SNAPSHOT_STALE: RecommendedAction(
+            code="REINDEX",
+            command=f"pkb index {name} --full --json",
+            available=True,
+            requires_user_approval=False,
+            reason="concrete_repository_delta",
+        ),
+        ProjectState.SNAPSHOT_CHANGED_DURING_CHECK: RecommendedAction(
+            code="RETRY_VERIFICATION",
+            command=f"pkb status {name} --verify strong --json",
+            available=True,
+            requires_user_approval=False,
+            reason="repository_changed_during_verification",
+        ),
+        ProjectState.SNAPSHOT_VERIFICATION_ERROR: RecommendedAction(
+            code="RETRY_VERIFICATION_OR_REINDEX",
+            command=f"pkb status {name} --verify strong --json",
+            available=True,
+            requires_user_approval=False,
+            reason="currentness_verification_error",
         ),
         ProjectState.LAST_INDEX_FAILED_PREVIOUS_SNAPSHOT_AVAILABLE: RecommendedAction(
             code="RETRY_INDEX",

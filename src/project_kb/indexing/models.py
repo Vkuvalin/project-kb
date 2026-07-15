@@ -25,8 +25,16 @@ class RepoState:
     branch: str | None
     status_fingerprint: str
     candidate_fingerprint: str
+    visibility_flags_before: tuple[str, ...] = ()
+    index_visibility_paths: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, str | None]:
+    @property
+    def visibility_sealed(self) -> bool:
+        """Whether one repository-state capture saw stable index visibility flags."""
+
+        return self.visibility_flags_before == self.index_visibility_paths
+
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -34,6 +42,23 @@ class RepoState:
 class Candidate:
     relative_path: str
     population: str
+
+
+@dataclass(frozen=True)
+class RepoObservation:
+    """One visibility-neutral repository capture bound to live-index generation evidence."""
+
+    state: RepoState
+    candidates: tuple[Candidate, ...]
+    index_generation_before: str
+    index_generation_after: str
+
+    @property
+    def sealed(self) -> bool:
+        return (
+            self.state.visibility_sealed
+            and self.index_generation_before == self.index_generation_after
+        )
 
 
 @dataclass
@@ -53,6 +78,14 @@ class FileFact:
     analysis_level: str
     classification_reason: str
     parse_status: str
+    file_occurrence_id: str | None = None
+    source_root_id: str | None = None
+    source_root_path: str | None = None
+    source_root_origin: str | None = None
+    module_name: str | None = None
+    module_resolution_status: str | None = None
+    module_candidates: tuple[str, ...] = ()
+    is_importable: bool = False
 
 
 @dataclass
@@ -76,6 +109,14 @@ class SymbolFact:
     end_column: int | None
     parent_symbol_id: str | None
     signature_text: str | None
+    occurrence_id: str | None = None
+    logical_key: str | None = None
+    canonical_qualified_name: str | None = None
+    module_name: str | None = None
+    binding_role: str = "DECLARATION"
+    parent_occurrence_id: str | None = None
+    occurrence_ordinal: int = 0
+    occurrence_contract_version: str | None = None
 
 
 @dataclass
@@ -91,6 +132,9 @@ class ImportFact:
     end_line: int
     resolution_status: str = "UNRESOLVED"
     resolved_file_id: str | None = None
+    normalized_module_name: str | None = None
+    v2_resolution_status: str | None = None
+    v2_resolved_file_occurrence_id: str | None = None
 
 
 @dataclass
@@ -136,9 +180,12 @@ class ScanFacts:
     relations: list[RelationFact] = field(default_factory=list)
     diagnostics: list[DiagnosticFact] = field(default_factory=list)
     evidence: dict[str, ObjectEvidence] = field(default_factory=dict)
+    packaging_evidence_state: str | None = None
+    packaging_evidence_markers: tuple[str, ...] = ()
     candidate_count: int = 0
     candidate_bytes: int = 0
     timings: dict[str, int] = field(default_factory=dict)
+    module_map_version: str | None = None
 
     def counts(self) -> dict[str, int]:
         return {

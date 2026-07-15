@@ -1,6 +1,6 @@
 """Typed status models for the Stage 3 JSON contract."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from project_kb.errors import ProjectKbError
@@ -93,11 +93,34 @@ class SnapshotCheck:
     indexed_at: str | None
     git_commit_at_index: str | None
     current_git_commit: str | None
-    is_current: bool
+    is_current: bool | None
     reason: str
+    availability: str = "AVAILABLE"
+    compatibility: str = "COMPATIBLE"
+    currentness: str = "UNVERIFIED"
+    truth_claim: str | None = None
+    verification_mode: str | None = None
+    verified_at: str | None = None
+    verification_duration_ms: int | None = None
+    verification_timings_ms: dict[str, int] = field(default_factory=dict)
+    verification_attempts: int = 0
+    mismatch_paths: tuple[str, ...] = ()
+    deltas: tuple[dict[str, Any], ...] = ()
+    diagnostics: tuple[dict[str, Any], ...] = ()
+    exclusions: tuple[str, ...] = ()
+    verification_scope: dict[str, Any] = field(default_factory=dict)
+    proof_contract_version: str | None = None
+    verifier_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.is_current is None:
+            payload.pop("is_current")
+        payload["mismatch_paths"] = list(self.mismatch_paths)
+        payload["deltas"] = list(self.deltas)
+        payload["diagnostics"] = list(self.diagnostics)
+        payload["exclusions"] = list(self.exclusions)
+        return payload
 
     @classmethod
     def absent(cls) -> SnapshotCheck:
@@ -109,10 +132,18 @@ class SnapshotCheck:
             current_git_commit=None,
             is_current=False,
             reason="snapshot_not_created",
+            availability="MISSING",
+            compatibility="NOT_APPLICABLE",
         )
 
     @classmethod
-    def not_checked(cls, reason: str) -> SnapshotCheck:
+    def not_checked(
+        cls,
+        reason: str,
+        *,
+        availability: str = "MISSING",
+        compatibility: str = "NOT_CHECKED",
+    ) -> SnapshotCheck:
         return cls(
             status="not_checked",
             snapshot_id=None,
@@ -121,6 +152,8 @@ class SnapshotCheck:
             current_git_commit=None,
             is_current=False,
             reason=reason,
+            availability=availability,
+            compatibility=compatibility,
         )
 
 
