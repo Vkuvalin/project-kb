@@ -135,7 +135,7 @@ Publication and registry state agree. There is no evidence for `PUBLICATION_OR_R
 
 | Proof dimension | Persisted v2 | Live/audit evidence | Result |
 |---|---|---|---|
-| Repository root | `c:\users\user\pycharmprojects\antique-attribution-ai` | Same resolved root | Match |
+| Repository root | `<TARGET_REPO>` | Same resolved root | Match |
 | Repository identity hash | `478f1853cfce216b1ab9611131780d03d74fea9cdb8018d748a9f3c76ba626e6` | Strong live identity matched | Match |
 | Binding generation | `<PROJECT_ID>` | Registry active/snapshot generation same | Match |
 | HEAD | `443a7a42478a09ad6a61a364b6ea817e44cb97ca` | Same | Match |
