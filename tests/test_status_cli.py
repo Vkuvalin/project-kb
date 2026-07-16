@@ -293,7 +293,12 @@ def test_git_root_mismatch_is_classified(
     nested.mkdir()
     with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
         conn.execute(
-            "UPDATE projects SET repo_root = ?, repo_root_norm = ? WHERE project_name_norm = ?",
+            """UPDATE workspaces
+               SET workspace_root = ?, workspace_root_norm = ?,
+                   row_version = row_version + 1, updated_at = updated_at
+               WHERE project_id = (
+                   SELECT project_id FROM projects WHERE project_name_norm = ?
+               ) AND workspace_kind = 'PRIMARY'""",
             (str(nested), normalize_repo_root(nested), "repo-one"),
         )
 
@@ -310,7 +315,12 @@ def test_status_initializes_legacy_fingerprint_once(
     _register("repo-one", temp_git_repo)
     with sqlite3.connect(isolated_kb_home / "registry.sqlite") as conn:
         conn.execute(
-            "UPDATE projects SET repo_fingerprint_json = NULL WHERE project_name_norm = ?",
+            """UPDATE workspaces
+               SET repository_fingerprint_json = NULL,
+                   row_version = row_version + 1, updated_at = updated_at
+               WHERE project_id = (
+                   SELECT project_id FROM projects WHERE project_name_norm = ?
+               ) AND workspace_kind = 'PRIMARY'""",
             ("repo-one",),
         )
 

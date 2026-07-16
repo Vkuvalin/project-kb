@@ -11,6 +11,8 @@ from project_kb.registry.schema import initialize_schema
 from project_kb.storage.home import resolve_home
 from project_kb.version import __version__
 
+REGISTRY_BUSY_TIMEOUT_MS = 1_000
+
 
 def registry_path(home: Path | None = None) -> Path:
     return (home or resolve_home()) / "registry.sqlite"
@@ -30,8 +32,7 @@ def open_registry(
         resolved_home.mkdir(parents=True, exist_ok=True)
         (resolved_home / "projects").mkdir(exist_ok=True)
         _ensure_safe_registry_file(db_path, allow_missing=True)
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _connect_registry(db_path)
         initialize_schema(
             conn,
             now=now,
@@ -39,9 +40,7 @@ def open_registry(
             event_id=event_id,
             allow_create=True,
         )
-        conn.commit()
         yield conn
-        conn.commit()
     except OSError as exc:
         raise RegistryOperationError(
             "Registry storage directory could not be prepared.",
@@ -79,8 +78,7 @@ def open_existing_registry(
 
     try:
         uri = f"{db_path.absolute().as_uri()}?mode=rw"
-        conn = sqlite3.connect(uri, uri=True)
-        conn.row_factory = sqlite3.Row
+        conn = _connect_registry(uri, uri=True)
         initialize_schema(
             conn,
             now=now,
@@ -88,9 +86,7 @@ def open_existing_registry(
             event_id=event_id,
             allow_create=False,
         )
-        conn.commit()
         yield conn
-        conn.commit()
     except OSError as exc:
         raise RegistryOperationError(
             "Registry file could not be opened.",
@@ -104,6 +100,40 @@ def open_existing_registry(
     finally:
         with suppress(UnboundLocalError):
             conn.close()
+
+
+@contextmanager
+def immediate_registry_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Own one short registry mutation using bounded ``BEGIN IMMEDIATE`` locking."""
+
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise RegistryOperationError("Registry write boundary requires foreign-key enforcement.")
+    if conn.in_transaction:
+        raise RegistryOperationError(
+            "Registry write boundary requires an idle connection.",
+            details={"transaction_mode": "BEGIN IMMEDIATE"},
+        )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
+def _connect_registry(path: Path | str, *, uri: bool = False) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        path,
+        uri=uri,
+        timeout=REGISTRY_BUSY_TIMEOUT_MS / 1_000,
+        isolation_level=None,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {REGISTRY_BUSY_TIMEOUT_MS}")
+    return conn
 
 
 def _ensure_safe_registry_file(db_path: Path, *, allow_missing: bool) -> bool:

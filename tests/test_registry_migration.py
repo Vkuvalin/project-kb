@@ -50,15 +50,29 @@ def test_populated_v1_registry_migrates_once_without_data_loss(
         migration_count = conn.execute(
             "SELECT COUNT(*) FROM registry_events WHERE event_type = 'schema_migrated'"
         ).fetchone()[0]
+        workspaces = conn.execute(
+            """SELECT workspace_root, workspace_root_norm, workspace_kind,
+                      workspace_binding_generation
+               FROM workspaces WHERE project_id = ?""",
+            (LEGACY_PROJECT_ID,),
+        ).fetchall()
 
     assert "repo_fingerprint_json" in columns
     assert {"repo_binding_generation", "snapshot_binding_generation"}.issubset(columns)
-    assert meta["schema_version"] == "3"
+    assert meta["schema_version"] == "4"
     assert meta["created_at"] == "2026-01-01T00:00:00Z"
     assert meta["tool_version"] == "0.1.0"
     assert project_count == 1
     assert original_event == ("Legacy registration event.",)
-    assert migration_count == 1
+    assert migration_count == 2
+    assert workspaces == [
+        (
+            str(temp_git_repo.resolve()),
+            normalize_repo_root(temp_git_repo.resolve()),
+            "PRIMARY",
+            first.repo_binding_generation,
+        )
+    ]
 
 
 def test_v2_relink_marker_migrates_to_distinct_binding_generations(
@@ -77,7 +91,12 @@ def test_v2_relink_marker_migrates_to_distinct_binding_generations(
     assert project.repo_binding_generation != project.snapshot_binding_generation
     with sqlite3.connect(registry_path) as conn:
         version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
-    assert version == "3"
+        workspace_binding = conn.execute(
+            "SELECT workspace_binding_generation FROM workspaces WHERE project_id = ?",
+            (project.project_id,),
+        ).fetchone()[0]
+    assert version == "4"
+    assert workspace_binding == project.repo_binding_generation
 
 
 def test_legacy_registry_without_relink_migrates_with_aligned_binding(
@@ -255,7 +274,7 @@ def test_legacy_history_migration_is_idempotent(
         migrations = conn.execute(
             "SELECT COUNT(*) FROM registry_events WHERE event_type = 'schema_migrated'"
         ).fetchone()[0]
-    assert migrations == 1
+    assert migrations == 2
 
 
 def test_safely_migrated_valid_v1_snapshot_remains_bounded_legacy_readable(

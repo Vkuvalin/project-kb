@@ -47,8 +47,17 @@ def test_registry_schema_tables_and_meta_are_initialized(isolated_kb_home: Path)
             "SELECT event_type FROM registry_events WHERE event_type = 'schema_initialized'"
         ).fetchone()
 
-    assert {"projects", "registry_events", "meta"}.issubset(tables)
-    assert meta["schema_version"] == "3"
+    assert {
+        "projects",
+        "workspaces",
+        "lifecycle_tasks",
+        "lifecycle_operations",
+        "snapshot_generations",
+        "managed_pointers",
+        "registry_events",
+        "meta",
+    }.issubset(tables)
+    assert meta["schema_version"] == "4"
     assert "created_at" in meta
     assert "tool_version" in meta
     assert event is not None
