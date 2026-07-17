@@ -184,6 +184,29 @@ class RegistryOperationError(ProjectKbError):
         )
 
 
+class LifecycleOperationError(ProjectKbError):
+    """Raised when an internal lifecycle operation must fail closed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            exit_code=REGISTRY_ERROR,
+            recommended_action=(
+                "Retry the exact operation or inspect its persisted lifecycle evidence."
+            ),
+            retryable=retryable,
+            details=details,
+        )
+
+
 class ProjectStatusError(ProjectKbError):
     """Structured problem associated with a classified status outcome."""
 
