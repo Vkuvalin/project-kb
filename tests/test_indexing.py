@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from project_kb.cli.app import app
 from project_kb.errors import IndexingError
+from project_kb.indexing import capture as capture_module
 from project_kb.indexing.models import ScanFacts, ScanPolicy
 from project_kb.indexing.policy import path_key
 from project_kb.indexing.service import IndexService
@@ -159,9 +160,7 @@ def test_repository_change_during_both_attempts_blocks_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_scan = service_module.scan_repository
+    real_scan = capture_module.scan_repository
     calls = 0
 
     def changing_scan(*args: object, **kwargs: object):
@@ -171,7 +170,7 @@ def test_repository_change_during_both_attempts_blocks_publication(
         (temp_git_repo / f"change-{calls}.py").write_text("value = 1\n", encoding="utf-8")
         return facts
 
-    monkeypatch.setattr(service_module, "scan_repository", changing_scan)
+    monkeypatch.setattr(capture_module, "scan_repository", changing_scan)
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
 
@@ -218,12 +217,11 @@ def test_snapshot_build_failure_preserves_previous_snapshot(
     IndexService().index("repo-one")
     current = Path(project.storage_path) / "kb.sqlite"
     previous_bytes = current.read_bytes()
-    from project_kb.indexing import service as service_module
 
     def fail_build(*args: object, **kwargs: object):
         raise IndexingError("induced build failure")
 
-    monkeypatch.setattr(service_module, "write_snapshot", fail_build)
+    monkeypatch.setattr(capture_module, "write_snapshot", fail_build)
     with pytest.raises(IndexingError):
         IndexService().index("repo-one")
     assert current.read_bytes() == previous_bytes

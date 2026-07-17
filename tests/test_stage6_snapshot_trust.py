@@ -10,6 +10,7 @@ from _stage6_support import git, write_gold_v1_snapshot
 
 import project_kb.indexing.scanner as scanner_module
 from project_kb.errors import IndexingError, RegistryOperationError, SnapshotQueryError
+from project_kb.indexing import capture as capture_module
 from project_kb.indexing.models import IndexOutcome, ScanPolicy
 from project_kb.indexing.module_map import (
     ModuleMap,
@@ -791,13 +792,11 @@ def test_same_root_relink_keeps_old_v1_quarantined_after_failed_reindex(
     assert relinked is not None
     assert relinked.repo_binding_generation != relinked.snapshot_binding_generation
 
-    from project_kb.indexing import service as service_module
-
     def fail_v2_write(*args: object, **kwargs: object) -> tuple[str, str, int, int]:
         del args, kwargs
         raise IndexingError("induced v2 reindex failure")
 
-    monkeypatch.setattr(service_module, "write_snapshot", fail_v2_write)
+    monkeypatch.setattr(capture_module, "write_snapshot", fail_v2_write)
     with pytest.raises(IndexingError):
         IndexService().index("repo-one")
 
@@ -912,13 +911,12 @@ def test_failed_v2_cutover_preserves_hand_authored_v1_canonical_bytes(
         repo_root_norm=project.repo_root_norm,
     )
     original = database.read_bytes()
-    from project_kb.indexing import service as service_module
 
     def fail_v2_write(*args: object, **kwargs: object) -> tuple[str, str, int, int]:
         del args, kwargs
         raise IndexingError("induced v2 cutover failure")
 
-    monkeypatch.setattr(service_module, "write_snapshot", fail_v2_write)
+    monkeypatch.setattr(capture_module, "write_snapshot", fail_v2_write)
 
     with pytest.raises(IndexingError):
         IndexService().index("repo-one")

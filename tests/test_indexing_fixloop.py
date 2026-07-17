@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from project_kb.cli.app import app
 from project_kb.errors import IndexingError, RegistryOperationError, SnapshotQueryError
+from project_kb.indexing import capture as capture_module
 from project_kb.indexing.extractor import extract_python
 from project_kb.indexing.models import Candidate, ScanPolicy
 from project_kb.indexing.scanner import (
@@ -400,9 +401,7 @@ def test_dirty_text_change_with_unchanged_porcelain_blocks_publication(
     target = temp_git_repo / "README.md"
     target.write_text("dirty-0\n")
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_scan = service_module.scan_repository
+    real_scan = capture_module.scan_repository
     calls = 0
 
     def changing_scan(*args: object, **kwargs: object):
@@ -412,7 +411,7 @@ def test_dirty_text_change_with_unchanged_porcelain_blocks_publication(
         target.write_text(f"dirty-{calls}\n")
         return facts
 
-    monkeypatch.setattr(service_module, "scan_repository", changing_scan)
+    monkeypatch.setattr(capture_module, "scan_repository", changing_scan)
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
     assert captured.value.code == "REPO_CHANGED_DURING_SCAN"
@@ -427,9 +426,7 @@ def test_metadata_only_change_with_unchanged_porcelain_blocks_publication(
     target.write_bytes(b"asset-0")
     _git(temp_git_repo, "add", "asset.bin")
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_scan = service_module.scan_repository
+    real_scan = capture_module.scan_repository
     calls = 0
 
     def changing_scan(*args: object, **kwargs: object):
@@ -439,7 +436,7 @@ def test_metadata_only_change_with_unchanged_porcelain_blocks_publication(
         target.write_bytes(f"asset-{calls}".encode())
         return facts
 
-    monkeypatch.setattr(service_module, "scan_repository", changing_scan)
+    monkeypatch.setattr(capture_module, "scan_repository", changing_scan)
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
     assert captured.value.code == "REPO_CHANGED_DURING_SCAN"
@@ -451,9 +448,7 @@ def test_identity_change_during_read_retries_once_and_then_publishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_scan = service_module.scan_repository
+    real_scan = capture_module.scan_repository
     calls = 0
 
     def first_read_changes(*args: object, **kwargs: object):
@@ -463,7 +458,7 @@ def test_identity_change_during_read_retries_once_and_then_publishes(
             raise RepositoryChangedError("identity changed during read")
         return real_scan(*args, **kwargs)
 
-    monkeypatch.setattr(service_module, "scan_repository", first_read_changes)
+    monkeypatch.setattr(capture_module, "scan_repository", first_read_changes)
 
     outcome = IndexService().index("repo-one")
 
@@ -478,9 +473,7 @@ def test_observed_repository_mutation_retries_once(
     reason: str,
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_scan = service_module.scan_repository
+    real_scan = capture_module.scan_repository
     calls = 0
 
     def first_attempt_changes(*args: object, **kwargs: object):
@@ -490,7 +483,7 @@ def test_observed_repository_mutation_retries_once(
             raise RepositoryChangedError(reason)
         return real_scan(*args, **kwargs)
 
-    monkeypatch.setattr(service_module, "scan_repository", first_attempt_changes)
+    monkeypatch.setattr(capture_module, "scan_repository", first_attempt_changes)
 
     IndexService().index("repo-one")
 
@@ -504,8 +497,6 @@ def test_non_mutation_scan_failure_does_not_retry_or_report_repository_changed(
     error_type: type[ScanError],
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
     calls = 0
 
     def fail_without_mutation(*_args: object, **_kwargs: object):
@@ -513,7 +504,7 @@ def test_non_mutation_scan_failure_does_not_retry_or_report_repository_changed(
         calls += 1
         raise error_type("static or ordinary failure")
 
-    monkeypatch.setattr(service_module, "scan_repository", fail_without_mutation)
+    monkeypatch.setattr(capture_module, "scan_repository", fail_without_mutation)
 
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
@@ -527,8 +518,6 @@ def test_second_identity_change_returns_repository_changed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
     calls = 0
 
     def always_changes(*_args: object, **_kwargs: object):
@@ -536,7 +525,7 @@ def test_second_identity_change_returns_repository_changed(
         calls += 1
         raise RepositoryChangedError("identity changed during read")
 
-    monkeypatch.setattr(service_module, "scan_repository", always_changes)
+    monkeypatch.setattr(capture_module, "scan_repository", always_changes)
 
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
@@ -553,9 +542,7 @@ def test_change_during_snapshot_build_or_validation_blocks_publication(
 ) -> None:
     target = temp_git_repo / "README.md"
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_phase = getattr(service_module, phase)
+    real_phase = getattr(capture_module, phase)
     calls = 0
 
     def mutate_after_phase(*args: object, **kwargs: object):
@@ -565,7 +552,7 @@ def test_change_during_snapshot_build_or_validation_blocks_publication(
         target.write_text(f"changed-{calls}\n")
         return result
 
-    monkeypatch.setattr(service_module, phase, mutate_after_phase)
+    monkeypatch.setattr(capture_module, phase, mutate_after_phase)
 
     with pytest.raises(IndexingError) as captured:
         IndexService().index("repo-one")
@@ -591,7 +578,7 @@ def test_final_verification_failure_blocks_atomic_replace(
     def forbidden_publish(*_args: object, **_kwargs: object) -> bool:
         raise AssertionError("os.replace publication must not be reached")
 
-    monkeypatch.setattr(service_module, "verify_scan_evidence", unstable_final_verification)
+    monkeypatch.setattr(capture_module, "verify_scan_evidence", unstable_final_verification)
     monkeypatch.setattr(service_module, "publish_snapshot", forbidden_publish)
 
     with pytest.raises(IndexingError) as captured:
@@ -641,9 +628,7 @@ def test_temporary_and_canonical_snapshot_keep_sealed_build_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     RegistryService().register("repo-one", temp_git_repo)
-    from project_kb.indexing import service as service_module
-
-    real_write = service_module.write_snapshot
+    real_write = capture_module.write_snapshot
     temporary_states: list[tuple[str, str]] = []
 
     def inspect_temporary(*args: object, **kwargs: object):
@@ -658,7 +643,7 @@ def test_temporary_and_canonical_snapshot_keep_sealed_build_state(
             )
         return result
 
-    monkeypatch.setattr(service_module, "write_snapshot", inspect_temporary)
+    monkeypatch.setattr(capture_module, "write_snapshot", inspect_temporary)
     outcome = IndexService().index("repo-one")
     database = Path(outcome.data["project"]["storage_path"]) / "kb.sqlite"
     with contextlib.closing(sqlite3.connect(database)) as conn:
@@ -845,17 +830,15 @@ def test_registry_failure_after_publication_reconciles_to_published_snapshot(
     source.write_text("def before():\n    return 1\n")
     RegistryService().register("repo-one", temp_git_repo)
     IndexService().index("repo-one")
-    from project_kb.indexing import service as service_module
-
-    real_write = service_module.write_snapshot
+    real_write = capture_module.write_snapshot
 
     def fail_build(*args: object, **kwargs: object):
         raise IndexingError("induced refresh failure")
 
-    monkeypatch.setattr(service_module, "write_snapshot", fail_build)
+    monkeypatch.setattr(capture_module, "write_snapshot", fail_build)
     with pytest.raises(IndexingError):
         IndexService().index("repo-one")
-    monkeypatch.setattr(service_module, "write_snapshot", real_write)
+    monkeypatch.setattr(capture_module, "write_snapshot", real_write)
     source.write_text("def after():\n    return 2\n")
     service = IndexService()
 
@@ -1072,12 +1055,11 @@ def test_query_after_failed_refresh_warns_and_exposes_provenance(
     (temp_git_repo / "module.py").write_text("def indexed():\n    return 1\n")
     RegistryService().register("repo-one", temp_git_repo)
     IndexService().index("repo-one")
-    from project_kb.indexing import service as service_module
 
     def fail_build(*args: object, **kwargs: object):
         raise IndexingError("induced refresh failure")
 
-    monkeypatch.setattr(service_module, "write_snapshot", fail_build)
+    monkeypatch.setattr(capture_module, "write_snapshot", fail_build)
     with pytest.raises(IndexingError):
         IndexService().index("repo-one")
 
