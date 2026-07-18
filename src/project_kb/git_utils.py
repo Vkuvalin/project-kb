@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -28,10 +29,19 @@ _ALLOWED_GIT_ARGUMENTS: Final = frozenset(
         ("rev-list", "--max-parents=0", "--all"),
         ("rev-parse", "--git-common-dir"),
         ("rev-parse", "--git-path", "index"),
+        ("rev-parse", "--git-path", "MERGE_HEAD"),
+        ("rev-parse", "--git-path", "CHERRY_PICK_HEAD"),
+        ("rev-parse", "--git-path", "REVERT_HEAD"),
+        ("rev-parse", "--git-path", "BISECT_LOG"),
+        ("rev-parse", "--git-path", "BISECT_START"),
+        ("rev-parse", "--git-path", "rebase-apply"),
+        ("rev-parse", "--git-path", "rebase-merge"),
+        ("rev-parse", "--git-path", "sequencer"),
         ("rev-parse", "--is-shallow-repository"),
         ("rev-parse", "--show-toplevel"),
         ("rev-parse", "--verify", "HEAD"),
         ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        ("symbolic-ref", "--quiet", "HEAD"),
         ("symbolic-ref", "--quiet", "--short", "HEAD"),
     }
 )
@@ -43,6 +53,19 @@ _TEMP_INDEX_WRITE_ARGUMENTS: Final = frozenset(
 _COMMIT_OBJECT_ARGUMENT: Final = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\^\{commit\}\Z")
 _GIT_ENVIRONMENT_PREFIX: Final = "GIT_"
 _TEMP_INDEX_CAPABILITY: Final = object()
+_FULL_HEAD_REF_OBSERVATION: Final = ContextVar("full_head_ref_observation", default=False)
+DETACHED_HEAD_REF: Final = "DETACHED"
+_CONFLICT_STATUSES: Final = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+_GIT_OPERATION_PATHS: Final = (
+    ("MERGE_HEAD", "MERGE"),
+    ("CHERRY_PICK_HEAD", "CHERRY_PICK"),
+    ("REVERT_HEAD", "REVERT"),
+    ("BISECT_LOG", "BISECT"),
+    ("BISECT_START", "BISECT"),
+    ("rebase-apply", "REBASE"),
+    ("rebase-merge", "REBASE"),
+    ("sequencer", "SEQUENCER"),
+)
 
 
 class GitIndexChangedError(RuntimeError):
@@ -63,6 +86,32 @@ class TemporaryGitIndex:
 class _GitIndexSnapshot:
     path: Path
     generation: str
+
+
+@dataclass(frozen=True)
+class GitWorkspaceObservation:
+    """One bounded read-only view of task-relevant Git workspace state."""
+
+    repository_root: Path
+    head: str | None
+    head_ref: str
+    staged_paths: tuple[str, ...]
+    unstaged_tracked_paths: tuple[str, ...]
+    untracked_paths: tuple[str, ...]
+    conflict_paths: tuple[str, ...]
+    operations: tuple[str, ...]
+    status_fingerprint: str
+
+    @property
+    def is_clean_committed(self) -> bool:
+        return (
+            self.head is not None
+            and not self.staged_paths
+            and not self.unstaged_tracked_paths
+            and not self.untracked_paths
+            and not self.conflict_paths
+            and not self.operations
+        )
 
 
 def safe_git_environment() -> dict[str, str]:
@@ -122,12 +171,18 @@ def run_git(
     ]
     if temp_index_write:
         command_config.extend(["-c", "core.splitIndex=false"])
+    command_args = (
+        ("symbolic-ref", "--quiet", "HEAD")
+        if _FULL_HEAD_REF_OBSERVATION.get()
+        and args == ("symbolic-ref", "--quiet", "--short", "HEAD")
+        else args
+    )
     return subprocess.run(
         [
             "git",
             "--no-pager",
             *command_config,
-            *args,
+            *command_args,
         ],
         cwd=repo_root,
         check=check,
@@ -182,6 +237,113 @@ def git_z(
 ) -> list[str]:
     payload = git_bytes(repo_root, *args, index_view=index_view)
     return [item.decode("utf-8", errors="surrogateescape") for item in payload.split(b"\0") if item]
+
+
+@contextmanager
+def full_head_ref_observation() -> Iterator[None]:
+    """Make legacy short-ref observer calls return the exact full symbolic ref."""
+
+    token = _FULL_HEAD_REF_OBSERVATION.set(True)
+    try:
+        yield
+    finally:
+        _FULL_HEAD_REF_OBSERVATION.reset(token)
+
+
+def observe_git_workspace(repo_root: Path) -> GitWorkspaceObservation:
+    """Observe HEAD/ref, dirty populations, conflicts, and in-progress operations.
+
+    The observer uses only the existing allow-listed, hook-free Git boundary and
+    direct existence checks for paths returned by ``git rev-parse --git-path``.
+    It never stages files, writes the index, invokes hooks, or mutates Git state.
+    """
+
+    repository_root = resolve_git_root(repo_root)
+    head = git_text(repository_root, "rev-parse", "--verify", "HEAD", allow_failure=True)
+    symbolic_ref = git_text(
+        repository_root,
+        "symbolic-ref",
+        "--quiet",
+        "HEAD",
+        allow_failure=True,
+    )
+    status_payload = git_bytes(
+        repository_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    staged, unstaged, untracked, conflicts = _parse_porcelain_v1_z(status_payload)
+    operations = _git_operations(repository_root)
+    return GitWorkspaceObservation(
+        repository_root=repository_root,
+        head=head or None,
+        head_ref=symbolic_ref or DETACHED_HEAD_REF,
+        staged_paths=staged,
+        unstaged_tracked_paths=unstaged,
+        untracked_paths=untracked,
+        conflict_paths=conflicts,
+        operations=operations,
+        status_fingerprint=hashlib.sha256(status_payload).hexdigest(),
+    )
+
+
+def _parse_porcelain_v1_z(
+    payload: bytes,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    records = [record for record in payload.split(b"\0") if record]
+    staged: list[str] = []
+    unstaged: list[str] = []
+    untracked: list[str] = []
+    conflicts: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index].decode("utf-8", errors="surrogateescape")
+        if len(record) < 3 or record[2] != " ":
+            raise ValueError("Git porcelain status contained a malformed record")
+        status = record[:2]
+        path = record[3:]
+        if status == "??":
+            untracked.append(path)
+        elif status != "!!":
+            if status in _CONFLICT_STATUSES:
+                conflicts.append(path)
+            if status[0] != " ":
+                staged.append(path)
+            if status[1] != " ":
+                unstaged.append(path)
+        if "R" in status or "C" in status:
+            index += 1
+            if index >= len(records):
+                raise ValueError("Git porcelain rename/copy record is incomplete")
+        index += 1
+    return (
+        tuple(staged),
+        tuple(unstaged),
+        tuple(untracked),
+        tuple(conflicts),
+    )
+
+
+def _git_operations(repo_root: Path) -> tuple[str, ...]:
+    operations: set[str] = set()
+    for marker, operation in _GIT_OPERATION_PATHS:
+        value = git_text(
+            repo_root,
+            "rev-parse",
+            "--git-path",
+            marker,
+            allow_failure=True,
+        )
+        if not value:
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = repo_root / path
+        if os.path.lexists(path):
+            operations.add(operation)
+    return tuple(sorted(operations))
 
 
 @contextmanager

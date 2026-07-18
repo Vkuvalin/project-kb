@@ -1,5 +1,6 @@
 """Registered repository health and identity checks."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from project_kb.resolver.repo_identity import (
     RepositoryFingerprint,
     build_repository_fingerprint,
     compare_repository_fingerprints,
+    normalize_path,
+    repository_identity_hash,
 )
 from project_kb.resolver.state import ProjectState
 
@@ -21,6 +24,53 @@ class RepositoryEvaluation:
     project: ProjectRecord
     check: RepoCheck
     state: ProjectState | None
+
+
+def workspace_matches_repository(
+    *,
+    registry: RegistryService,
+    repository_root: Path,
+    project_id: str,
+    workspace_id: str,
+    workspace_root_norm: str,
+    expected_repository_identity_hash: str,
+    workspace_binding_generation: str,
+    fingerprint_builder: Callable[[Path], RepositoryFingerprint] = (build_repository_fingerprint),
+) -> bool:
+    """Fail closed unless the exact ACTIVE workspace still owns this checkout."""
+
+    workspace = registry.find_workspace_by_id(workspace_id)
+    if workspace is None or workspace.repository_fingerprint_json is None:
+        return False
+    try:
+        actual_root = resolve_git_root(repository_root)
+        actual_root_norm = normalize_path(actual_root)
+        expected_root_norm = normalize_path(Path(workspace_root_norm))
+        registered_root_norm = normalize_path(Path(workspace.workspace_root_norm))
+        stored_fingerprint = RepositoryFingerprint.from_json(workspace.repository_fingerprint_json)
+        live_fingerprint = fingerprint_builder(actual_root)
+        fingerprint_matches = compare_repository_fingerprints(
+            stored_fingerprint,
+            live_fingerprint,
+            repo_root=actual_root,
+        ).matches
+        active_identity_hash = repository_identity_hash(
+            workspace.workspace_root_norm,
+            workspace.repository_fingerprint_json,
+        )
+    except NotGitRepositoryError, OSError, RegistryOperationError, ValueError:
+        return False
+    return (
+        workspace.project_id == project_id
+        and workspace.workspace_id == workspace_id
+        and workspace.workspace_state == "ACTIVE"
+        and actual_root_norm == expected_root_norm
+        and actual_root_norm == registered_root_norm
+        and workspace.workspace_root_norm == workspace_root_norm
+        and active_identity_hash == expected_repository_identity_hash
+        and workspace.workspace_binding_generation == workspace_binding_generation
+        and fingerprint_matches
+    )
 
 
 def check_registered_repository(

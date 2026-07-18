@@ -22,11 +22,9 @@ from project_kb.indexing.models import IndexOutcome, ScanPolicy
 from project_kb.indexing.scanner import RepositoryChangedError, ScanError
 from project_kb.registry.service import RegistryService, utc_now
 from project_kb.resolver.project import ProjectStatusService
+from project_kb.resolver.repo_check import workspace_matches_repository
 from project_kb.resolver.repo_identity import (
-    RepositoryFingerprint,
     build_repository_fingerprint,
-    compare_repository_fingerprints,
-    normalize_path,
     repository_identity_hash,
 )
 from project_kb.resolver.state import ProjectState
@@ -421,37 +419,17 @@ class IndexService:
         expected: CaptureWorkspace,
     ) -> bool:
         active_project = self.registry.find_project_by_name(project_name)
-        if active_project is None or active_project.repo_fingerprint_json is None:
+        if active_project is None:
             return False
-        try:
-            actual_root_norm = normalize_path(repository_root)
-            expected_root_norm = normalize_path(Path(expected.repo_root_norm))
-            registered_root_norm = normalize_path(Path(active_project.repo_root))
-            stored_fingerprint = RepositoryFingerprint.from_json(
-                active_project.repo_fingerprint_json
-            )
-            live_fingerprint = build_repository_fingerprint(repository_root)
-            fingerprint_matches = compare_repository_fingerprints(
-                stored_fingerprint,
-                live_fingerprint,
-                repo_root=repository_root,
-            ).matches
-        except OSError, ValueError:
-            return False
-        active_identity_hash = repository_identity_hash(
-            active_project.repo_root_norm,
-            active_project.repo_fingerprint_json,
-        )
-        return (
-            active_project.project_id == expected.project_id
-            and active_project.workspace_id == expected.workspace_id
-            and active_project.workspace_state == "ACTIVE"
-            and actual_root_norm == expected_root_norm
-            and actual_root_norm == registered_root_norm
-            and active_project.repo_root_norm == expected.repo_root_norm
-            and active_identity_hash == expected.repository_identity_hash
-            and active_project.repo_binding_generation == expected.binding_generation
-            and fingerprint_matches
+        return workspace_matches_repository(
+            registry=self.registry,
+            repository_root=repository_root,
+            project_id=expected.project_id,
+            workspace_id=expected.workspace_id,
+            workspace_root_norm=expected.repo_root_norm,
+            expected_repository_identity_hash=expected.repository_identity_hash,
+            workspace_binding_generation=expected.binding_generation,
+            fingerprint_builder=build_repository_fingerprint,
         )
 
     def _record_capture_retry(

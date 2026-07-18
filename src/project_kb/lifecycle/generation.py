@@ -51,6 +51,7 @@ _OPERATION_SPECS = {
 }
 _SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SEALED_EVENT_TYPE = "lifecycle_generation_sealed"
+_CAPTURE_CONTRACT_FINGERPRINT_VERSION = 1
 _WINDOWS_RENAME_FAILS_IF_EXISTS = os.name == "nt"
 _TERMINAL_PREPUBLICATION_CODES = frozenset(
     {
@@ -102,6 +103,18 @@ class GenerationReservationRequest:
     expected_head: str | None
     expected_branch: str | None
     actor_context: Mapping[str, Any]
+    activate_task_on_commit: bool = False
+
+
+@dataclass(frozen=True)
+class BeginTaskReservation:
+    """Task facts inserted atomically with a new BEGIN_TASK reservation."""
+
+    capture_contract_fingerprint: str
+    baseline_head_commit: str
+    baseline_head_ref: str | None
+    project_baseline_snapshot_id: str | None
+    project_baseline_pointer_version: int | None
 
 
 @dataclass(frozen=True)
@@ -129,6 +142,7 @@ class OperationReservation:
     reserved_task_version: int
     expected_head: str | None
     expected_branch: str | None
+    activate_task_on_commit: bool
     paths: ManagedGenerationPaths
     lease_owner: str
     lease_token: str
@@ -169,6 +183,8 @@ class GenerationPublicationResult:
     file_size: int
     file_sha256: str
     pointer_versions: tuple[tuple[str, int], ...]
+    task_state: str
+    task_row_version: int
     replayed: bool
 
 
@@ -206,6 +222,7 @@ def capture_contract_fingerprint(contract: CaptureContract) -> str:
     """Return the stable fingerprint persisted by a lifecycle task."""
 
     payload = {
+        "fingerprint_version": _CAPTURE_CONTRACT_FINGERPRINT_VERSION,
         "schema_version": contract.schema_version,
         "scanner_version": contract.scanner_version,
         "policy": asdict(contract.policy),
@@ -214,6 +231,12 @@ def capture_contract_fingerprint(contract: CaptureContract) -> str:
         "verifier_version": contract.verifier_version,
         "module_map_version": contract.module_map_version,
         "occurrence_contract_version": contract.occurrence_contract_version,
+        "generation_storage_layout_version": GENERATION_STORAGE_LAYOUT_VERSION,
+        "capture_scope_exclusion_contract": {
+            "policy_version": contract.policy.policy_version,
+            "discovered_metadata_paths": list(contract.policy.discovered_metadata_paths),
+            "discovered_pruned_roots": list(contract.policy.discovered_pruned_roots),
+        },
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
@@ -240,6 +263,32 @@ class LifecycleGenerationService:
         lease: OperationLease,
     ) -> OperationReservation:
         """Reserve identity/sequence/CAS evidence in one short immediate transaction."""
+
+        return self._reserve_operation(request, lease, begin_task=None)
+
+    def reserve_begin_task_operation(
+        self,
+        request: GenerationReservationRequest,
+        lease: OperationLease,
+        begin_task: BeginTaskReservation,
+    ) -> OperationReservation:
+        """Create one DRAFT and reserve its baseline operation atomically."""
+
+        if request.operation_kind != "BEGIN_TASK" or not request.activate_task_on_commit:
+            raise LifecycleOperationError(
+                "Atomic task creation is available only to an activating BEGIN_TASK request.",
+                code="LIFECYCLE_REQUEST_INVALID",
+            )
+        return self._reserve_operation(request, lease, begin_task=begin_task)
+
+    def _reserve_operation(
+        self,
+        request: GenerationReservationRequest,
+        lease: OperationLease,
+        *,
+        begin_task: BeginTaskReservation | None,
+    ) -> OperationReservation:
+        """Owned implementation shared by existing-task and atomic-begin reservations."""
 
         _validate_reservation_request(request)
         _validate_lease(lease)
@@ -320,6 +369,8 @@ class LifecycleGenerationService:
                     )
                 else:
                     workspace = self._require_workspace(conn, request)
+                    if begin_task is not None:
+                        self._insert_begin_task(conn, request, begin_task)
                     task = self._require_task_for_reservation(conn, request)
                     unresolved = conn.execute(
                         """SELECT operation_id, reserved_snapshot_id, operation_phase
@@ -671,6 +722,39 @@ class LifecycleGenerationService:
                 "operation_phase": reservation.operation_phase,
             },
         )
+
+    def request_for_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> GenerationReservationRequest | None:
+        """Return the exact durable generation request for task-level replay."""
+
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise LifecycleOperationError(
+                "Idempotency key is invalid.",
+                code="LIFECYCLE_REQUEST_INVALID",
+                details={"field": "idempotency_key"},
+            )
+        with self._registry() as conn:
+            row = conn.execute(
+                "SELECT * FROM lifecycle_operations WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            durable_plan = _json_object(
+                row["expected_pointer_versions_json"],
+                field="operation_plan",
+            )
+            normalized_request = _persisted_request_plan(durable_plan)
+            request = _request_from_normalized_plan(idempotency_key, normalized_request)
+            if row["request_fingerprint"] != _fingerprint(_request_plan(request)):
+                raise LifecycleOperationError(
+                    "Persisted request fingerprint does not match its normalized plan.",
+                    code="OPERATION_IDENTITY_MISMATCH",
+                    details={"operation_id": row["operation_id"]},
+                )
+            return request
 
     def resolve_generation(
         self,
@@ -1680,6 +1764,11 @@ class LifecycleGenerationService:
                         ),
                     )
                     pointer_versions = self._apply_pointer_plan(conn, reservation, timestamp)
+                    task_state, task_row_version = self._finalize_task_for_generation(
+                        conn,
+                        reservation,
+                        timestamp,
+                    )
                     current_operation = self._require_operation(conn, reservation.operation_id)
                     self._update_operation_phase(
                         conn,
@@ -1697,6 +1786,8 @@ class LifecycleGenerationService:
                             "snapshot_id": reservation.snapshot_id,
                             "generation_sequence": reservation.generation_sequence,
                             "pointer_versions": dict(pointer_versions),
+                            "task_state": task_state,
+                            "task_row_version": task_row_version,
                         },
                     )
                 return GenerationPublicationResult(
@@ -1708,6 +1799,8 @@ class LifecycleGenerationService:
                     file_size=verified.file_size,
                     file_sha256=verified.file_sha256,
                     pointer_versions=pointer_versions,
+                    task_state=task_state,
+                    task_row_version=task_row_version,
                     replayed=False,
                 )
             except sqlite3.IntegrityError as exc:
@@ -1716,6 +1809,67 @@ class LifecycleGenerationService:
                     "Generation registration or pointer CAS lost a concurrent race.",
                     {"sqlite_error": str(exc)},
                 ) from exc
+
+    def _finalize_task_for_generation(
+        self,
+        conn: sqlite3.Connection,
+        reservation: OperationReservation,
+        timestamp: str,
+    ) -> tuple[str, int]:
+        if reservation.activate_task_on_commit:
+            cursor = conn.execute(
+                """UPDATE lifecycle_tasks
+                   SET task_state = 'ACTIVE', row_version = row_version + 1, updated_at = ?
+                   WHERE task_id = ? AND project_id = ? AND workspace_id = ?
+                     AND workspace_binding_generation = ? AND task_state = 'DRAFT'
+                     AND row_version = ?
+                     AND next_generation_sequence = ?""",
+                (
+                    timestamp,
+                    reservation.task_id,
+                    reservation.project_id,
+                    reservation.workspace_id,
+                    reservation.workspace_binding_generation,
+                    reservation.reserved_task_version,
+                    reservation.generation_sequence + 1,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise _FinalizationConflict(
+                    "TASK_VERSION_CONFLICT",
+                    "DRAFT task could not transition to ACTIVE with its baseline commit.",
+                    {
+                        "task_id": reservation.task_id,
+                        "expected_task_version": reservation.reserved_task_version,
+                    },
+                )
+        task = conn.execute(
+            "SELECT task_state, row_version FROM lifecycle_tasks WHERE task_id = ?",
+            (reservation.task_id,),
+        ).fetchone()
+        expected_state = (
+            "ACTIVE"
+            if reservation.activate_task_on_commit
+            else _OPERATION_SPECS[reservation.operation_kind][2]
+        )
+        expected_version = reservation.reserved_task_version + (
+            1 if reservation.activate_task_on_commit else 0
+        )
+        if (
+            task is None
+            or task["task_state"] != expected_state
+            or task["row_version"] != expected_version
+        ):
+            raise _FinalizationConflict(
+                "TASK_VERSION_CONFLICT",
+                "Task result evidence changed before operation commit.",
+                {
+                    "task_id": reservation.task_id,
+                    "expected_task_state": expected_state,
+                    "expected_task_version": expected_version,
+                },
+            )
+        return task["task_state"], task["row_version"]
 
     def _register_orphan(
         self,
@@ -2220,6 +2374,129 @@ class LifecycleGenerationService:
             },
         ) from cause
 
+    def _insert_begin_task(
+        self,
+        conn: sqlite3.Connection,
+        request: GenerationReservationRequest,
+        begin_task: BeginTaskReservation,
+    ) -> None:
+        if (
+            request.expected_task_version != 0
+            or request.parent_snapshot_id is not None
+            or not _is_sha256(begin_task.capture_contract_fingerprint)
+            or begin_task.baseline_head_commit != request.expected_head
+            or begin_task.baseline_head_ref != request.expected_branch
+        ):
+            raise LifecycleOperationError(
+                "BEGIN_TASK reservation facts are inconsistent.",
+                code="LIFECYCLE_REQUEST_INVALID",
+            )
+        if (begin_task.project_baseline_snapshot_id is None) != (
+            begin_task.project_baseline_pointer_version is None
+        ):
+            raise LifecycleOperationError(
+                "Project-baseline snapshot and version must be pinned together.",
+                code="LIFECYCLE_REQUEST_INVALID",
+            )
+        if begin_task.project_baseline_snapshot_id is not None:
+            _require_id(
+                begin_task.project_baseline_snapshot_id,
+                field="project_baseline_snapshot_id",
+            )
+            if (
+                not isinstance(begin_task.project_baseline_pointer_version, int)
+                or isinstance(begin_task.project_baseline_pointer_version, bool)
+                or begin_task.project_baseline_pointer_version < 0
+            ):
+                raise LifecycleOperationError(
+                    "Project-baseline pointer version is invalid.",
+                    code="LIFECYCLE_REQUEST_INVALID",
+                )
+        existing_task = conn.execute(
+            "SELECT task_id FROM lifecycle_tasks WHERE task_id = ?",
+            (request.task_id,),
+        ).fetchone()
+        if existing_task is not None:
+            raise LifecycleOperationError(
+                "Generated task identity already exists.",
+                code="TASK_RESERVATION_CONFLICT",
+                details={"task_id": request.task_id},
+            )
+        open_task = conn.execute(
+            """SELECT task_id, task_state FROM lifecycle_tasks
+               WHERE workspace_id = ? AND workspace_binding_generation = ?
+                 AND task_state IN ('DRAFT', 'ACTIVE', 'BLOCKED')
+               LIMIT 1""",
+            (request.workspace_id, request.workspace_binding_generation),
+        ).fetchone()
+        if open_task is not None:
+            raise LifecycleOperationError(
+                "Workspace binding already owns an open task lineage.",
+                code="OPEN_TASK_EXISTS",
+                details={
+                    "task_id": open_task["task_id"],
+                    "task_state": open_task["task_state"],
+                },
+            )
+        baseline = conn.execute(
+            """SELECT snapshot_id, pointer_version FROM managed_pointers
+               WHERE project_id = ? AND task_id IS NULL
+                 AND pointer_role = 'PROJECT_BASELINE'""",
+            (request.project_id,),
+        ).fetchone()
+        actual_baseline = (
+            None
+            if baseline is None
+            else (
+                baseline["snapshot_id"],
+                baseline["pointer_version"],
+            )
+        )
+        expected_baseline = (
+            None
+            if begin_task.project_baseline_snapshot_id is None
+            else (
+                begin_task.project_baseline_snapshot_id,
+                begin_task.project_baseline_pointer_version,
+            )
+        )
+        if actual_baseline != expected_baseline:
+            raise LifecycleOperationError(
+                "Project baseline changed before task reservation.",
+                code="PROJECT_BASELINE_CHANGED",
+                details={"expected": expected_baseline, "actual": actual_baseline},
+            )
+        timestamp = self._timestamp()
+        try:
+            conn.execute(
+                """INSERT INTO lifecycle_tasks (
+                       task_id, project_id, workspace_id, workspace_binding_generation,
+                       task_state, capture_contract_fingerprint, baseline_head_commit,
+                       baseline_head_ref, next_generation_sequence,
+                       project_baseline_snapshot_id, project_baseline_pointer_version,
+                       row_version, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, 0, ?, ?, 0, ?, ?)""",
+                (
+                    request.task_id,
+                    request.project_id,
+                    request.workspace_id,
+                    request.workspace_binding_generation,
+                    begin_task.capture_contract_fingerprint,
+                    begin_task.baseline_head_commit,
+                    begin_task.baseline_head_ref,
+                    begin_task.project_baseline_snapshot_id,
+                    begin_task.project_baseline_pointer_version,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise LifecycleOperationError(
+                "Task/open-lineage reservation lost a concurrent registry race.",
+                code="TASK_RESERVATION_CONFLICT",
+                details={"sqlite_error": str(exc)},
+            ) from exc
+
     def _require_task_for_reservation(
         self,
         conn: sqlite3.Connection,
@@ -2421,6 +2698,7 @@ class LifecycleGenerationService:
         capture_contract = durable_plan.get("capture_contract_fingerprint")
         repository_root_norm = durable_plan.get("repository_root_norm")
         repository_identity = durable_plan.get("repository_identity_hash")
+        activate_task_on_commit = normalized_request.get("activate_task_on_commit", False)
         if (
             capture_purpose != normalized_request.get("capture_purpose")
             or not isinstance(capture_contract, str)
@@ -2429,6 +2707,10 @@ class LifecycleGenerationService:
             or not repository_root_norm
             or not isinstance(repository_identity, str)
             or not _is_sha256(repository_identity)
+            or not isinstance(activate_task_on_commit, bool)
+            or (
+                activate_task_on_commit and normalized_request.get("operation_kind") != "BEGIN_TASK"
+            )
         ):
             row_mismatches["durable_operation_plan"] = "invalid"
         if row_mismatches:
@@ -2481,6 +2763,7 @@ class LifecycleGenerationService:
             reserved_task_version=row["expected_task_version"] + 1,
             expected_head=normalized_request.get("expected_head"),
             expected_branch=normalized_request.get("expected_branch"),
+            activate_task_on_commit=activate_task_on_commit,
             paths=paths,
             lease_owner=owner,
             lease_token=token,
@@ -2721,12 +3004,31 @@ class LifecycleGenerationService:
                 for expectation in reservation.pointer_expectations
             )
             expected_version_map = dict(expected_versions)
+            expected_task_state = (
+                "ACTIVE"
+                if reservation.activate_task_on_commit
+                else _OPERATION_SPECS[reservation.operation_kind][2]
+            )
+            expected_task_version = reservation.reserved_task_version + (
+                1 if reservation.activate_task_on_commit else 0
+            )
+            committed_event = committed_events[0] if len(committed_events) == 1 else {}
+            event_task_state = committed_event.get("task_state")
+            event_task_version = committed_event.get("task_row_version")
+            task_result_evidence_valid = (
+                event_task_state == expected_task_state
+                and event_task_version == expected_task_version
+            ) or (
+                not reservation.activate_task_on_commit
+                and event_task_state is None
+                and event_task_version is None
+            )
             valid_event = (
                 len(committed_events) == 1
-                and committed_events[0].get("snapshot_id") == reservation.snapshot_id
-                and committed_events[0].get("generation_sequence")
-                == reservation.generation_sequence
-                and committed_events[0].get("pointer_versions") == expected_version_map
+                and committed_event.get("snapshot_id") == reservation.snapshot_id
+                and committed_event.get("generation_sequence") == reservation.generation_sequence
+                and committed_event.get("pointer_versions") == expected_version_map
+                and task_result_evidence_valid
             )
             if not valid_event:
                 raise LifecycleOperationError(
@@ -2767,6 +3069,8 @@ class LifecycleGenerationService:
             file_size=descriptor.file_size,
             file_sha256=descriptor.file_sha256,
             pointer_versions=expected_versions,
+            task_state=expected_task_state,
+            task_row_version=expected_task_version,
             replayed=replayed,
         )
 
@@ -2929,6 +3233,14 @@ def _validate_reservation_request(request: GenerationReservationRequest) -> None
             details={"field": "actor_context"},
         )
     _canonical_json(dict(request.actor_context))
+    if not isinstance(request.activate_task_on_commit, bool) or (
+        request.activate_task_on_commit and request.operation_kind != "BEGIN_TASK"
+    ):
+        raise LifecycleOperationError(
+            "Task activation is permitted only for BEGIN_TASK.",
+            code="LIFECYCLE_REQUEST_INVALID",
+            details={"field": "activate_task_on_commit"},
+        )
 
 
 def _validate_lease(lease: OperationLease) -> None:
@@ -2957,7 +3269,7 @@ def _validate_lease(lease: OperationLease) -> None:
 
 
 def _request_plan(request: GenerationReservationRequest) -> dict[str, Any]:
-    return {
+    plan = {
         "version": 1,
         "operation_kind": request.operation_kind,
         "project_id": request.project_id,
@@ -2972,6 +3284,9 @@ def _request_plan(request: GenerationReservationRequest) -> dict[str, Any]:
         "expected_branch": request.expected_branch,
         "actor_context": dict(request.actor_context),
     }
+    if request.activate_task_on_commit:
+        plan["activate_task_on_commit"] = True
+    return plan
 
 
 def _persisted_operation_plan(
@@ -3026,7 +3341,37 @@ def _request_from_reservation(
         expected_head=reservation.expected_head,
         expected_branch=reservation.expected_branch,
         actor_context={"recovered": True},
+        activate_task_on_commit=reservation.activate_task_on_commit,
     )
+
+
+def _request_from_normalized_plan(
+    idempotency_key: str,
+    normalized: Mapping[str, Any],
+) -> GenerationReservationRequest:
+    pointers = normalized.get("pointers")
+    if not isinstance(pointers, list):
+        raise LifecycleOperationError(
+            "Persisted lifecycle pointer plan is invalid.",
+            code="OPERATION_IDENTITY_MISMATCH",
+        )
+    request = GenerationReservationRequest(
+        idempotency_key=idempotency_key,
+        operation_kind=normalized.get("operation_kind"),
+        project_id=normalized.get("project_id"),
+        workspace_id=normalized.get("workspace_id"),
+        workspace_binding_generation=normalized.get("workspace_binding_generation"),
+        task_id=normalized.get("task_id"),
+        expected_task_version=normalized.get("expected_task_version"),
+        parent_snapshot_id=normalized.get("parent_snapshot_id"),
+        pointer_expectations=tuple(_pointer_from_dict(value) for value in pointers),
+        expected_head=normalized.get("expected_head"),
+        expected_branch=normalized.get("expected_branch"),
+        actor_context=normalized.get("actor_context"),
+        activate_task_on_commit=normalized.get("activate_task_on_commit", False),
+    )
+    _validate_reservation_request(request)
+    return request
 
 
 def _pointer_dict(pointer: PointerExpectation) -> dict[str, Any]:
@@ -3056,6 +3401,7 @@ def _contract_fingerprint_from_metadata(metadata: Mapping[str, Any]) -> str:
     policy = _json_object(metadata["policy_json"], field="policy_json")
     extractors = metadata["extractor_versions"]
     payload = {
+        "fingerprint_version": _CAPTURE_CONTRACT_FINGERPRINT_VERSION,
         "schema_version": metadata["schema_version"],
         "scanner_version": metadata["scanner_version"],
         "policy": policy,
@@ -3064,6 +3410,12 @@ def _contract_fingerprint_from_metadata(metadata: Mapping[str, Any]) -> str:
         "verifier_version": metadata["verifier_version"],
         "module_map_version": metadata["module_map_version"],
         "occurrence_contract_version": metadata["occurrence_contract_version"],
+        "generation_storage_layout_version": GENERATION_STORAGE_LAYOUT_VERSION,
+        "capture_scope_exclusion_contract": {
+            "policy_version": policy["policy_version"],
+            "discovered_metadata_paths": policy["discovered_metadata_paths"],
+            "discovered_pruned_roots": policy["discovered_pruned_roots"],
+        },
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
