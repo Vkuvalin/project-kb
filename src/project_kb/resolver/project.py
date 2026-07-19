@@ -1,6 +1,5 @@
 """Project status resolution orchestration."""
 
-import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime
@@ -28,9 +27,6 @@ from project_kb.resolver.models import (
 )
 from project_kb.resolver.repo_check import check_registered_repository
 from project_kb.resolver.repo_identity import (
-    RepositoryFingerprint,
-    build_repository_fingerprint,
-    compare_repository_fingerprints,
     repository_identity_hash,
 )
 from project_kb.resolver.state import (
@@ -43,6 +39,7 @@ from project_kb.snapshot.currentness import (
     CurrentnessState,
     RepositoryBindingObservation,
     VerificationMode,
+    observe_repository_binding,
     verify_snapshot_currentness,
 )
 from project_kb.snapshot.database import SCHEMA_VERSION, validate_snapshot
@@ -528,25 +525,11 @@ class ProjectStatusService:
             )
         if current.repo_fingerprint_json is None:
             raise ValueError("active repository fingerprint is unavailable")
-        stored_fingerprint = RepositoryFingerprint.from_json(current.repo_fingerprint_json)
-        repo_root = Path(current.repo_root)
-        live_fingerprint = build_repository_fingerprint(repo_root)
-        comparison = compare_repository_fingerprints(
-            stored_fingerprint,
-            live_fingerprint,
-            repo_root=repo_root,
-        )
-        live_identity_token = hashlib.sha256(live_fingerprint.to_json().encode("utf-8")).hexdigest()
-        return RepositoryBindingObservation(
+        return observe_repository_binding(
+            repo_root=Path(current.repo_root),
             repo_root_norm=current.repo_root_norm,
-            repository_identity_hash=repository_identity_hash(
-                current.repo_root_norm,
-                current.repo_fingerprint_json,
-            ),
+            repository_fingerprint_json=current.repo_fingerprint_json,
             repository_binding_generation=current.repo_binding_generation,
-            live_identity_token=live_identity_token,
-            live_identity_matches=comparison.matches,
-            live_identity_reason=comparison.reason,
         )
 
     def _registry_problem(

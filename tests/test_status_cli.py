@@ -25,6 +25,7 @@ from project_kb.resolver.state import STATE_POLICIES, ProjectState
 
 runner = CliRunner()
 REQUIRED_STATUS_SECTIONS = {
+    "snapshot_source",
     "resolution",
     "project",
     "project_state",
@@ -53,6 +54,7 @@ def test_status_resolves_explicit_project_name_and_returns_complete_contract(
     assert payload["error"] is None
     assert payload["meta"]["contract_version"] == 1
     assert set(payload["data"]) == REQUIRED_STATUS_SECTIONS
+    assert payload["data"]["snapshot_source"] == "LEGACY_CANONICAL"
     assert payload["data"]["resolution"]["resolved_by"] == "project_name"
     assert payload["data"]["project"]["project_id"] == project["project_id"]
     assert {

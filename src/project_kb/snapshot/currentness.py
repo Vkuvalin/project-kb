@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -30,6 +31,12 @@ from project_kb.indexing.scanner import (
     capture_repo_observation,
     compare_persisted_evidence,
     git_status_paths,
+)
+from project_kb.resolver.repo_identity import (
+    RepositoryFingerprint,
+    build_repository_fingerprint,
+    compare_repository_fingerprints,
+    repository_identity_hash,
 )
 
 
@@ -124,6 +131,7 @@ def verify_snapshot_currentness(
     policy: ScanPolicy | None = None,
     active_binding: Callable[[], RepositoryBindingObservation] | None = None,
     expected_binding: tuple[str, str, str] | None = None,
+    temporary_index_root: Path | None = None,
     max_attempts: int = 2,
 ) -> CurrentnessResult:
     """Verify one compatible v2 snapshot without importing or executing target code."""
@@ -169,7 +177,7 @@ def verify_snapshot_currentness(
         excluded_pruned_roots = tuple(
             entry.relative_path for entry in proof_entries if entry.proof_class == "EXCLUDED_PRUNED"
         )
-        temporary_index_root = snapshot_path.parent
+        temporary_index_root = temporary_index_root or snapshot_path.parent
         if len(expected_candidates) != len(proof_entries):
             raise ValueError("proof manifest contains duplicate path identities")
 
@@ -523,6 +531,36 @@ def verify_snapshot_currentness(
             diagnostics=({"kind": "ERROR", "error_type": type(exc).__name__},),
             exclusions=exclusions,
         )
+
+
+def observe_repository_binding(
+    *,
+    repo_root: Path,
+    repo_root_norm: str,
+    repository_fingerprint_json: str,
+    repository_binding_generation: str,
+) -> RepositoryBindingObservation:
+    """Observe one active binding without coupling lifecycle reads to the resolver."""
+
+    stored_fingerprint = RepositoryFingerprint.from_json(repository_fingerprint_json)
+    live_fingerprint = build_repository_fingerprint(repo_root)
+    comparison = compare_repository_fingerprints(
+        stored_fingerprint,
+        live_fingerprint,
+        repo_root=repo_root,
+    )
+    live_identity_token = hashlib.sha256(live_fingerprint.to_json().encode("utf-8")).hexdigest()
+    return RepositoryBindingObservation(
+        repo_root_norm=repo_root_norm,
+        repository_identity_hash=repository_identity_hash(
+            repo_root_norm,
+            repository_fingerprint_json,
+        ),
+        repository_binding_generation=repository_binding_generation,
+        live_identity_token=live_identity_token,
+        live_identity_matches=comparison.matches,
+        live_identity_reason=comparison.reason,
+    )
 
 
 def _finish(

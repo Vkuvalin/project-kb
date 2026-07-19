@@ -1,5 +1,6 @@
 """Resolver-gated structural snapshot query service."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,36 @@ from project_kb.resolver.state import ProjectState
 from project_kb.snapshot.database import SnapshotReader
 
 
+class SnapshotQueryAdapter:
+    """One query adapter shared by canonical and exact lifecycle read targets."""
+
+    def __init__(self, reader: SnapshotReader, context: Mapping[str, Any]) -> None:
+        self.reader = reader
+        self.context = dict(context)
+
+    def symbols(
+        self,
+        *,
+        file: str | None,
+        name: str | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return dict(self.context), self.reader.symbols(file=file, name=name)
+
+    def imports(
+        self,
+        *,
+        file: str | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return dict(self.context), self.reader.imports(file=file)
+
+    def inspect(
+        self,
+        *,
+        file: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return dict(self.context), self.reader.inspect_file(file)
+
+
 class QueryService:
     def __init__(self, *, home: Path | None = None, working_directory: Path | None = None) -> None:
         self.status_service = ProjectStatusService(home=home, working_directory=working_directory)
@@ -17,20 +48,21 @@ class QueryService:
     def symbols(
         self, project_name: str | None, *, file: str | None, name: str | None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        status, reader = self._reader(project_name)
-        return self._context(status, reader), reader.symbols(file=file, name=name)
+        return self._adapter(project_name).symbols(file=file, name=name)
 
     def imports(
         self, project_name: str | None, *, file: str | None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        status, reader = self._reader(project_name)
-        return self._context(status, reader), reader.imports(file=file)
+        return self._adapter(project_name).imports(file=file)
 
     def inspect(
         self, project_name: str | None, *, file: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._adapter(project_name).inspect(file=file)
+
+    def _adapter(self, project_name: str | None) -> SnapshotQueryAdapter:
         status, reader = self._reader(project_name)
-        return self._context(status, reader), reader.inspect_file(file)
+        return SnapshotQueryAdapter(reader, self._context(status, reader))
 
     def _reader(self, project_name: str | None) -> tuple[Any, SnapshotReader]:
         status = self.status_service.status(project_name)
@@ -109,6 +141,7 @@ class QueryService:
                 }
             )
         return {
+            "snapshot_source": "LEGACY_CANONICAL",
             "resolution": status.resolution.to_dict(),
             "project": status.project.to_dict(),
             "project_state": status.project_state.value,
@@ -116,6 +149,7 @@ class QueryService:
             "last_index_outcome": status.project.last_status,
             "snapshot": {
                 "snapshot_id": reader.meta["snapshot_id"],
+                "snapshot_source": "LEGACY_CANONICAL",
                 "created_at": reader.meta["created_at"],
                 "schema_version": reader.meta["schema_version"],
                 "scanner_version": reader.meta["scanner_version"],

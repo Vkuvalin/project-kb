@@ -193,6 +193,7 @@ class StatusOutcome:
 
     def data(self) -> dict[str, Any]:
         return {
+            "snapshot_source": "LEGACY_CANONICAL",
             "resolution": self.resolution.to_dict(),
             "project": self.project.to_dict() if self.project else None,
             "project_state": self.project_state.value,
