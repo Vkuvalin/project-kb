@@ -405,11 +405,6 @@ def failure_attempt(error: BaseException) -> CaptureAttempt | None:
     return attempt if isinstance(attempt, CaptureAttempt) else None
 
 
-def failure_attempt_number(error: BaseException) -> int | None:
-    attempt_number = getattr(error, "capture_attempt_number", None)
-    return attempt_number if isinstance(attempt_number, int) else None
-
-
 def failure_artifact_owned(error: BaseException) -> bool | None:
     owned = getattr(error, "capture_artifact_owned", None)
     return owned if isinstance(owned, bool) else None

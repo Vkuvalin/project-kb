@@ -31,7 +31,6 @@
   write-shaped Git call populates an internally created managed-storage
   temporary index from staged entries without visibility bits and never targets
   the live repository index or Git directory.
-- `src/project_kb/core/` remains reserved for later project logic.
 
 ## CLI
 

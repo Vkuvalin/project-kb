@@ -6,7 +6,6 @@ from project_kb.exit_codes import (
     DESTRUCTIVE_CONFIRMATION_REQUIRED,
     GIT_REPO_ERROR,
     INTERNAL_ERROR,
-    NOT_IMPLEMENTED,
     PROJECT_NOT_REGISTERED,
     REGISTRY_ERROR,
     REPO_PATH_ERROR,
@@ -47,26 +46,6 @@ class ProjectKbError(Exception):
             "retryable": self.retryable,
             "details": self.details,
         }
-
-
-class NotImplementedFeatureError(ProjectKbError):
-    """Raised when a command is known but intentionally not implemented yet."""
-
-    def __init__(
-        self,
-        message: str = "Project resolver will be implemented in a later stage.",
-        *,
-        recommended_action: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(
-            code="NOT_IMPLEMENTED",
-            message=message,
-            exit_code=NOT_IMPLEMENTED,
-            recommended_action=recommended_action,
-            retryable=False,
-            details=details,
-        )
 
 
 class InvalidProjectNameError(ProjectKbError):

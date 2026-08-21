@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -24,7 +23,12 @@ from project_kb.registry.db import (
     open_existing_registry,
     open_registry,
 )
-from project_kb.registry.models import WORKSPACE_STATES, ProjectRecord, WorkspaceRecord
+from project_kb.registry.models import (
+    PROJECT_NAME_PATTERN,
+    WORKSPACE_STATES,
+    ProjectRecord,
+    WorkspaceRecord,
+)
 from project_kb.resolver.repo_identity import (
     RepositoryFingerprint,
     build_repository_fingerprint,
@@ -37,7 +41,6 @@ from project_kb.storage.home import (
     storage_path_matches_expected,
 )
 
-PROJECT_NAME_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}\Z")
 PROJECT_WITH_PRIMARY_WORKSPACE_SQL = """
 SELECT
     p.project_id,
