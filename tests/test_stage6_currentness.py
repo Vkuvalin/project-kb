@@ -20,6 +20,11 @@ EXPECTED_CURRENTNESS_STATES = {
     "CHANGED_DURING_CHECK",
     "ERROR",
 }
+UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS = {
+    "can_search": False,
+    "can_generate_exports": False,
+    "can_generate_context": False,
+}
 runner = CliRunner()
 
 
@@ -230,6 +235,11 @@ def test_publication_and_unverified_status_expose_captured_stable_truth(
     assert status.snapshot_check.verification_mode is None
     assert status.snapshot_check.verified_at is None
     assert status.snapshot_check.verification_timings_ms == {}
+    assert status.availability.to_dict() == {
+        "can_use_project": True,
+        "can_use_snapshot": True,
+        **UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS,
+    }
     assert query.exit_code == 0
     query_snapshot = json.loads(query.output)["data"]["snapshot"]
     assert query_snapshot["currentness"] == "UNVERIFIED"
@@ -276,15 +286,20 @@ def test_visibility_neutral_observation_is_stable_and_preserves_real_index(
     assert index_path.read_bytes() == staged_index_bytes
 
 
-def test_status_cli_exposes_authoritative_strong_currentness(temp_git_repo: Path) -> None:
+def test_status_cli_exposes_strong_currentness_without_unimplemented_features(
+    temp_git_repo: Path,
+) -> None:
     (temp_git_repo / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
     RegistryService().register("repo-one", temp_git_repo)
     IndexService().index("repo-one")
 
     result = runner.invoke(app, ["status", "repo-one", "--verify", "strong", "--json"])
+    capabilities = runner.invoke(app, ["capabilities", "--json"])
 
     assert result.exit_code == 0
-    snapshot = json.loads(result.output)["data"]["snapshot_check"]
+    assert capabilities.exit_code == 0
+    status_data = json.loads(result.output)["data"]
+    snapshot = status_data["snapshot_check"]
     assert snapshot["currentness"] == "CURRENT"
     assert snapshot["truth_claim"] == "CURRENT_AT_VERIFIED_TIME"
     assert snapshot["verification_mode"] == "strong"
@@ -293,6 +308,22 @@ def test_status_cli_exposes_authoritative_strong_currentness(temp_git_repo: Path
     assert snapshot["verifier_version"]
     _assert_utc_timestamp(snapshot["verified_at"])
     assert "is_current" not in snapshot
+    availability = status_data["availability"]
+    assert availability == {
+        "can_use_project": True,
+        "can_use_snapshot": True,
+        **UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS,
+    }
+    capability_features = json.loads(capabilities.output)["data"]["features"]
+    reported_feature_flags = {
+        "can_search": capability_features["search"],
+        "can_generate_exports": capability_features["exports"],
+        "can_generate_context": capability_features["context_packs"],
+    }
+    assert reported_feature_flags == UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
+    assert reported_feature_flags == {
+        name: availability[name] for name in UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
+    }
 
     human = runner.invoke(app, ["status", "repo-one", "--verify", "strong"])
     assert human.exit_code == 0
@@ -393,6 +424,11 @@ def test_strong_mode_hashes_dirty_text_when_git_status_fingerprint_is_unchanged(
     assert indexed_state.status_fingerprint == current_state.status_fingerprint
     assert status.snapshot_check.currentness == "STALE"
     assert status.snapshot_check.mismatch_paths == ("module.py",)
+    assert status.availability.to_dict() == {
+        "can_use_project": True,
+        "can_use_snapshot": True,
+        **UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS,
+    }
 
 
 def test_strong_mode_staging_only_transition_with_original_worktree_bytes_is_current(
@@ -754,8 +790,15 @@ def test_same_root_relink_during_verification_never_returns_current(
     assert status.snapshot_check.currentness == "UNVERIFIED"
     assert status.project_state == "SNAPSHOT_REBUILD_REQUIRED"
     assert status.availability.can_use_snapshot is False
+    assert {
+        name: getattr(status.availability, name)
+        for name in UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
+    } == UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
     assert after.project_state == "SNAPSHOT_REBUILD_REQUIRED"
     assert after.availability.can_use_snapshot is False
+    assert {
+        name: getattr(after.availability, name) for name in UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
+    } == UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
 
 
 def test_one_unstable_proof_attempt_is_discarded_before_current_is_returned(

@@ -634,16 +634,13 @@ def _availability(
         GateRequirement.STORAGE_VALID,
     )
     snapshot_requirements = (*project_requirements, GateRequirement.SNAPSHOT_PRESENT)
-    current_snapshot_requirements = (
-        *snapshot_requirements,
-        GateRequirement.SNAPSHOT_CURRENT,
-    )
     return Availability(
         can_use_project=evaluate_gate(context, project_requirements).allowed,
         can_use_snapshot=evaluate_gate(context, snapshot_requirements).allowed,
-        can_search=evaluate_gate(context, current_snapshot_requirements).allowed,
-        can_generate_exports=evaluate_gate(context, current_snapshot_requirements).allowed,
-        can_generate_context=evaluate_gate(context, current_snapshot_requirements).allowed,
+        # can_use_snapshot описывает структурное чтение; публичные возможности ниже не реализованы.
+        can_search=False,
+        can_generate_exports=False,
+        can_generate_context=False,
     )
 
 
