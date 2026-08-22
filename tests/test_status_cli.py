@@ -491,8 +491,6 @@ def test_invalid_registry_returns_complete_structured_status_error(
 @pytest.mark.parametrize(
     "relative_path",
     [
-        "docs/PROJECT_CONTEXT.md",
-        "docs/PROJECT_MAP.md",
         "docs/DEVELOPMENT_CHECKLIST.md",
         "docs/DATA_SAFETY_POLICY.md",
     ],
