@@ -1,105 +1,163 @@
 # Project KB
 
-Local project knowledge layer for agent-assisted development.
+> **Status: frozen portfolio/reference implementation.**
 
-Project KB registers local Git repositories and builds deterministic structural
-snapshots outside the source repository. The current index contains safe file
-metadata and hashes, Python AST symbols/imports, basic exact relations, and
-parse diagnostics. It never imports or executes target code.
+Project KB — локальная read-oriented база структурного знания о Python-проекте. Она
+строит неизменяемый SQLite snapshot, отделённый от исходников, и предоставляет
+узкие структурные чтения через CLI/query surface и persistent MCP transport.
 
-Candidate population is Git tracked plus untracked/non-ignored files. V0 also
-performs bounded exact checks for a small universal set of technical prune roots
-such as .venv, node_modules, and __pycache__; it does not recursively crawl
-ignored trees. There are no reference-repository defaults or public per-project
-scanner policies. Non-standard ignored runtime paths may therefore be absent
-from the snapshot.
+Основные ориентиры дизайна:
 
-## Usage
+- проверяемая currentness вместо молчаливого доверия устаревшему snapshot;
+- воспроизводимый полный capture и явная provenance;
+- ограниченное владение записью вне source tree;
+- fail-closed поведение на границах identity, paths и capabilities;
+- детерминированные идентификаторы там, где их гарантирует контракт.
 
-```powershell
-pkb register my-project C:\path\to\repository --json
-pkb index my-project --full --json
-pkb status my-project --json
-pkb status my-project --verify strong --json
-pkb symbols my-project --file src/package/module.py --json
-pkb symbols my-project --name MyClass --json
-pkb imports my-project --file src/package/module.py --json
-pkb inspect my-project --file src/package/module.py --json
-```
+## What it is
 
-Omit the project name when the current directory is inside a registered Git
-repository. `pkb index` and `pkb index --full` both perform the same full rebuild;
-incremental refresh is not implemented.
+Project KB превращает допустимую Git population локального проекта в структурный
+snapshot: сведения о файлах, Python symbols/imports, relations и diagnostics. Source,
+indexing и snapshot остаются разными слоями; целевой Python-код не импортируется и не
+исполняется.
 
-Status keeps snapshot availability separate from currentness. Without
-`--verify`, a valid semantic-v2 snapshot reports `currentness = UNVERIFIED` and
-`truth_claim = CAPTURED_STABLE`: it was built, sealed, repository-bound, and
-atomically published from a stable observation, without claiming that the
-workspace cannot change afterward. `--verify strong` is the only authoritative
-existing-snapshot verifier. It rebuilds an isolated temporary index under
-managed project storage from a stable staged-entry view without
-assume-unchanged or skip-worktree bits, then observes candidates/status through
-that visibility-neutral view. The live raw-index identity plus logical
-staged-entry and visibility projections are sealed before/after;
-stable visibility flags are rejected and any detected index instability retries
-rather than producing `CURRENT`. The real Git index is never modified.
-Strong verification checks the persisted v2 candidate and per-object proof manifest;
-stable whole-repository Git status is diagnostic, not an independent stale
-predicate outside that declared scope. It reseals live repository identity
-before completion and reports `CURRENT`, `STALE`, `UNVERIFIED`,
-`CHANGED_DURING_CHECK`, or `ERROR`. A `CURRENT` result carries
-`truth_claim = CURRENT_AT_VERIFIED_TIME`, `verification_mode = strong`, and an
-absolute UTC `verified_at`; it does not claim permanent currentness. The legacy
-`--verify fast` token returns `FAST_VERIFICATION_REMOVED`, recommends strong
-verification or a new full capture, and performs no proof or state mutation.
-It emits no verification timestamp or timing. Verification is manual; there is
-no watcher or automatic refresh. Valid legacy v1 snapshots remain readable,
-but strong currentness verification returns an explicit full-reindex action
-without fabricating verification time. Structural SQLite queries against an
-available snapshot remain bounded lookups; they are distinct from currentness
-verification and future incremental refresh.
-Every explicit relink rotates the active registry binding generation, so an
-older snapshot remains unavailable—even after a failed reindex—until a full
-reindex succeeds for that binding.
+Канонический query service читает активный snapshot через resolver gates. Отдельный
+долгоживущий `pkb-mcp` process обслуживает bounded structural queries к одному явно
+закреплённому snapshot без права менять source state, искать `latest` или повышать
+currentness claim.
 
-File-scoped `symbols` and `imports` queries return `FILE_NOT_INDEXED` when the
-path is absent. Queries against a preserved snapshot after a failed refresh
-succeed with an explicit warning and include snapshot, file-hash, and extractor
-provenance. The --name filter is a case-sensitive literal prefix; an empty
-prefix matches all indexed symbols.
+## Why it exists
 
-When they enter Git-based candidate population, real environment files such as
-.env, .env.local, and .env.production and exact credential/token basenames are
-metadata-only hard secrets and are never opened or content-hashed. An ignored
-.env commonly remains absent because V0 does not enumerate ignored files.
-Template files .env.example, .env.sample, .env.template, and .env.dist remain
-eligible for structural text indexing.
+Повторное сканирование большого или долго живущего codebase может увеличивать latency,
+шум и расход контекста agentic tools. Project KB исследует более узкий подход: один
+структурный источник полезен, когда identity проекта явна, snapshot заморожен, запросы
+ограничены, а stale state обнаруживается, а не принимается на доверии.
 
-Snapshot databases are fully built and sealed before publication. One
-same-volume os.replace is the only canonical publication commit; the canonical
-SQLite file is not reopened for state mutation. Registry and run-file
-bookkeeping results are reported as recorded, not_recorded, or unknown. New
-snapshots use semantic schema v2 with active-repository binding, canonical
-module/occurrence identity, and an explicit verification proof manifest.
-Root packaging evidence is classified as absent, supported, unsupported, or
-unreadable. Convention-based exact module identity is allowed only when that
-evidence is absent; `setup.cfg`, `setup.py`, unsupported backends, and
-unreadable `pyproject.toml` remain explicitly non-exact. Explicit roots and
-supported unambiguous packaging roots retain precedence, and Project KB never
-executes packaging files. A fail-closed non-exact module row is a valid semantic
-v2 state rather than snapshot corruption, so the snapshot may still be sealed
-and published. Canonical module names and logical symbol keys remain unavailable
-for those files until the source-root authority is statically supported or
-explicitly supplied.
-Relinking preserves project storage but requires a full reindex before the old
-snapshot can be exposed for the new repository binding.
+Это архитектурный выбор, а не обещание, что Project KB всегда быстрее, дешевле или
+точнее прямого чтения исходников.
 
-## Development
+## What is implemented
 
-```powershell
+| Capability | Status | Boundary |
+| --- | --- | --- |
+| Project registry и identity | Implemented | `register`, `projects`, `relink`, `unregister`; active workspace binding проверяется явно |
+| Full structural indexing | Implemented | Полная сборка, validation/sealing и атомарная публикация canonical SQLite snapshot |
+| Status и currentness | Implemented | Availability отделена от strong verification; удалённый `fast` не создаёт claim о текущести |
+| Immutable snapshot reader и CLI queries | Implemented | `symbols`, `imports`, `inspect`; resolver-gated read-only structural lookup |
+| Persistent structural MCP transport | Implemented | Четыре bounded read-only tools над одним operator-pinned snapshot |
+| Managed generation lifecycle | Internal-only | Create-once generations, selectors, exact reads и comparisons без публичного CLI/MCP entrypoint |
+| Search, exports, context packs | Disabled | Generic/semantic search и генерация exports/context не входят в frozen capability contract |
+
+CLI также предоставляет `version`, `status` и `capabilities`. Публичного стабильного
+Python API проект не объявляет.
+
+## Quick start
+
+Требуется Python `>=3.14`. Из корня checkout установите зафиксированные зависимости и
+проверьте CLI:
+
+```text
 uv sync
 uv run pkb --help
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
 ```
+
+Минимальный путь для локального Git-проекта:
+
+```text
+uv run pkb register my-project .
+uv run pkb index my-project --full
+uv run pkb status my-project --verify strong
+uv run pkb symbols my-project --name MySymbol
+```
+
+`register` и `index` пишут только в managed storage Project KB, не в source tree.
+Имя проекта можно опустить в `status`, `index` и структурных запросах, если текущий
+каталог находится внутри зарегистрированного repository. `index` и `index --full`
+сейчас выполняют одну и ту же полную сборку; incremental indexing не реализован.
+
+Для MCP operator должен передать процессу `PKB_MCP_SNAPSHOT_PATH`,
+`PKB_MCP_PROJECT_ID`, `PKB_MCP_SNAPSHOT_ID`, `PKB_MCP_SNAPSHOT_SHA256` и
+`PKB_MCP_SOURCE_COMMIT`, затем запустить:
+
+```text
+uv run pkb-mcp
+```
+
+Transport использует stdio и не разрешает registry, active snapshot или currentness
+автоматически: полная pinned identity является обязательной частью запуска.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    Source["Python source"] --> Identity["Project identity / registry"]
+    Identity --> Indexing["Full structural indexing"]
+    Indexing --> Snapshot["Immutable SQLite snapshot"]
+    Identity --> Status["Status / currentness"]
+    Snapshot --> Status
+    Snapshot --> Query["Structural query service"]
+    Query --> CLI["CLI"]
+    Snapshot --> MCP["Pinned MCP transport"]
+```
+
+- Source tree — read-only вход, а не writable knowledge store.
+- Полная сборка создаёт sealed snapshot до его атомарной публикации.
+- Availability и currentness — независимые оси; `CURRENT` относится к моменту проверки.
+- CLI читает canonical snapshot через resolver gates.
+- MCP — отдельный pinned transport, а не source of truth или live registry frontend.
+
+Подробности ownership и data flows: [Architecture](docs/ARCHITECTURE.md).
+
+## Experiments and findings
+
+| Area | Observation | Limit |
+| --- | --- | --- |
+| E4A pre-MCP | Проверенные access workflows были жизнеспособны | Каждая exact cell имела `N=1`; широкое обобщение не поддерживается |
+| G2 — `AUDIT_1V2` | Candidate policies дали сильный описательный сигнал эффективности по elapsed и input tokens | Фактическое MCP-использование не было обязательным, поэтому причинный эффект Project KB/MCP не изолирован |
+| G2 — `AUDIT_4V2` | Elapsed benefit был мал или отсутствовал, а обе candidate policies потребовали примерно в 2,4 раза больше input tokens | Отрицательный результат нельзя скрывать общим средним или превращать в универсальный вывод |
+| Expansion и freeze | Расширение остановлено до formal N5; G3 не создавался | Freeze — инженерное/product decision, а не научный результат |
+
+Evaluator erratum ослабил наивное сравнение canonical correctness: поздняя mapping-only
+диагностика не заменяет историческую evaluation. Результаты описывают конкретные задачи,
+условия и среду; они не устанавливают статистическую значимость, общее превосходство или
+чистый causal effect.
+
+Методика и полная интерпретация находятся в [Benchmark Methodology](docs/BENCHMARK.md)
+и [Experiments and Results](docs/EXPERIMENTS_AND_RESULTS.md).
+
+## Safety and limitations
+
+- Source repository не является writable knowledge store; persistent writes ограничены
+  явно принадлежащим Project KB managed storage.
+- Snapshot и managed generations имеют раздельных владельцев и publication lanes.
+- Status проверяет stale/currentness state; читаемый snapshot не обязательно current.
+- Unsupported capabilities остаются выключенными и не выводятся из наличия storage или
+  внутреннего subsystem.
+- MCP предоставляет только structural/read-oriented доступ к pinned snapshot и не
+  доказывает его текущесть.
+- Проект не проходил промышленную сертификацию; benchmark findings зависят от задач и
+  среды измерения.
+- Frozen status не обещает активной дальнейшей разработки.
+
+Нормативные границы записи, Git, paths, secrets и fail-closed поведения описаны в
+[Data Safety Policy](docs/DATA_SAFETY_POLICY.md).
+
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| [Architecture](docs/ARCHITECTURE.md) | Текущая архитектура, компоненты и ownership boundaries |
+| [Data Safety Policy](docs/DATA_SAFETY_POLICY.md) | Границы записи, чтения, identity и currentness |
+| [Development History](docs/DEVELOPMENT_HISTORY.md) | Инженерная история и решение о freeze |
+| [Benchmark Methodology](docs/BENCHMARK.md) | Дизайн экспериментов и границы интерпретации |
+| [Experiments and Results](docs/EXPERIMENTS_AND_RESULTS.md) | Измеренные результаты, errata и freeze interpretation |
+
+## Project status
+
+**Status: frozen.** Codebase сохранён как законченная portfolio/reference implementation,
+демонстрирующая structural snapshot architecture, safety boundaries и ограниченную
+экспериментальную проверку.
+
+Дальнейшее benchmark expansion, G3, реконструкция formal N5 и ремонт evaluator не
+являются активными workstreams. Это осознанное завершение scope, а не утверждение о
+сломанном или незавершённом состоянии проекта.
