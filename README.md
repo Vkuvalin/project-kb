@@ -148,6 +148,7 @@ Evaluator erratum ослабил наивное сравнение canonical cor
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | Текущая архитектура, компоненты и ownership boundaries |
 | [Data Safety Policy](docs/DATA_SAFETY_POLICY.md) | Границы записи, чтения, identity и currentness |
+| [Development Checklist](docs/DEVELOPMENT_CHECKLIST.md) | Стабильные contributor и publication gates |
 | [Development History](docs/DEVELOPMENT_HISTORY.md) | Инженерная история и решение о freeze |
 | [Benchmark Methodology](docs/BENCHMARK.md) | Дизайн экспериментов и границы интерпретации |
 | [Experiments and Results](docs/EXPERIMENTS_AND_RESULTS.md) | Измеренные результаты, errata и freeze interpretation |

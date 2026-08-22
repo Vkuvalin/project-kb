@@ -1,96 +1,155 @@
-# Development Checklist
+# Project KB Development Checklist
 
-Before handing off code changes:
+## 1. How to use this checklist
 
-- Run `uv sync` after dependency changes.
-- Run `uv run pkb --help`.
-- For registry/resolver/storage changes, use an explicit temporary
-  `PROJECT_KB_HOME`, register only a safe test repository, and run both
-  `uv run pkb status <project_name> --json` and `uv run pkb status --json`.
-- Never run destructive, mismatch, missing-path, or storage-removal validation
-  against a real registration or real Project KB home.
-- Run `uv run pytest`.
-- Run `uv run ruff check .`.
-- Run `uv run ruff format --check .`.
-- Run `git diff --check`.
-- Keep tests isolated from real user data by setting `PROJECT_KB_HOME` to a test
-  temporary directory under managed project storage.
-- Keep Git fingerprint tests local and deterministic. Do not fetch or probe
-  remotes, and assert that raw origin URLs never enter output or registry data.
-- For any Git observation change, use the shared allow-listed runner and assert
-  `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL`, `GIT_NO_LAZY_FETCH`, and
-  `GIT_OPTIONAL_LOCKS=0`; cover removal of inherited repository/index/object
-  redirectors and dynamic `GIT_CONFIG_*` injection, exact argument rejection,
-  disabled local `core.fsmonitor` execution, controlled managed-storage temporary-only
-  `GIT_INDEX_FILE`, cleanup, and byte-for-byte preservation of the live index.
-- For indexer changes, cover tracked plus untracked/non-ignored Git population,
-  universal-only bounded ignored-root visibility, Git path-spelling priority,
-  absence of reference-derived defaults, hard-secret no-read/no-hash behavior,
-  exact credential/token basenames, safe environment templates, ignored .env
-  absence, ordinary credential/token-named source, probe-first binary handling,
-  large files, strict UTF-8/BOM decoding, opened-file identity, and
-  parent/final-component redirect races.
-- Validate Python syntax-failure recovery, deterministic import resolution,
-  repeated full-rebuild logical equivalence, repository-change detection, and
-  previous-snapshot preservation after build/publication failure.
-- Validate final candidate/evidence verification after temporary build and
-  validation, one retry followed by REPO_CHANGED_DURING_SCAN, and refusal to
-  publish when the repository changes immediately before replacement.
-- Distinguish proven mutation from static unsafe paths, permissions, sharing
-  failures, ordinary open failures, and ordinary read failures; only mutation
-  receives the bounded retry.
-- Validate schema manifests and compatibility mismatches separately from
-  physical SQLite corruption. Check snapshot_meta.run_id against exactly one
-  matching run and validate SEALED/BUILD_SUCCEEDED before publication. Assert
-  that os.replace is the sole commit and canonical SQLite bytes are not mutated
-  afterward.
-- Distinguish valid v1, valid v2, unknown/incompatible, corrupt, and wrong-
-  repository snapshots before applying version-specific invariants. Assert that
-  v1-to-v2 cutover is a full source reindex, never row migration.
-- Cover canonical source-root mapping, ambiguous roots, scripts, namespace
-  layouts, duplicate logical definitions, snapshot-bound occurrence IDs,
-  unsupported or unreadable packaging that must not fall through to convention,
-  safe `setup.cfg`/`setup.py` marker detection without execution, supported
-  packaging, no-packaging convention, and explicit-root precedence.
-- For currentness changes, cover explicit `FAST_VERIFICATION_REMOVED`, no fast
-  `CURRENT`/`STALE`, timestamp, timing, or state mutation, the full strong
-  mutation matrix, same-status dirty changes, bounded retry,
-  `CHANGED_DURING_CHECK`, verifier `ERROR`, proof corruption, hard-secret
-  exclusions, unconditional terminal candidate/state/binding/object proof,
-  clean-commit races, stable assume-unchanged and skip-worktree state, and an
-  enable/hidden-write/disable ABA inside the final authoritative capture for
-  both flags under strong verification. Exercise the staged-entry-derived,
-  visibility-neutral temporary-index
-  production boundary, live-index generation retry, and no-real-index-mutation;
-  also cover live identity
-  mismatch/change/change-back under strong verification,
-  relink-generation fail-closed across failed reindex, UTC `verified_at` on
-  completed strong outcomes, and no fabricated fast or v1 timing.
-- For strong scope, prove staging-only transitions with unchanged worktree
-  bytes, tracked hard-secret changes, and tracked pruned-root changes remain
-  `CURRENT` only within explicit exclusions. Raw status instability must retry;
-  included content and relevant candidate additions/removals remain `STALE`.
-- For legacy registry migration, use realistic historical relink/index-outcome
-  events, including same-root relink, failed/later-successful reindex, missing
-  history, idempotence, and bounded valid-v1 readability.
-- Check registry and run-file bookkeeping independently for recorded,
-  not_recorded, and unknown outcomes. Later ancillary failure must preserve
-  already proven outcomes when the active binding is unchanged. A same-root
-  relink after replace but before outcome recording must quarantine the new
-  snapshot and must not be reported as usable success.
-- Verify missing-file query errors, empty facts for an indexed file, provenance,
-  binary-collated case-sensitive literal symbol prefixes (including underscore,
-  percent, and empty input), and warning propagation when a previous snapshot
-  is queried after a failed refresh.
-- Dogfood only with an isolated temporary `PROJECT_KB_HOME`. Capture the target
-  repository's HEAD, branch, and full porcelain status before and after; never
-  execute target modules, scripts, tests, hooks, migrations, or services.
-- Check `pkb symbols`, `pkb imports`, and `pkb inspect` against bounded exact
-  path/line samples after a successful rebuild.
+Это стабильный список gates для разработки и публикации, а не журнал работ и не
+историческая матрица. Не каждый пункт применим к каждому изменению: перед принятием
+изменения отметьте все затронутые gates и зафиксируйте неприменимые границы явно.
 
-The current implementation is full-rebuild with explicit post-publication
-strong verification; public affirmative fast verification is removed. Do not
-claim incremental or automatic refresh,
-watchers, unconditional currentness without verification, generic chunk/search
-behavior, runtime dependency tracing, cross-snapshot lineage, or semantic graph
-coverage.
+Технические владельцы деталей — [Architecture](ARCHITECTURE.md) и
+[Data Safety Policy](DATA_SAFETY_POLICY.md). Статус frozen означает, что новый
+продуктовый scope требует отдельного явного решения; его нельзя добавлять незаметно
+через расширение этого checklist.
+
+## 2. Before changing the product
+
+- [ ] Определена точная цель изменения и перечислены затронутые публичные и внутренние
+  поверхности.
+- [ ] Подтверждено, что изменение относится к сопровождению frozen Project KB, а не
+  расширяет продуктовый scope.
+- [ ] В [Architecture](ARCHITECTURE.md) найден текущий компонент и владелец
+  затрагиваемой ответственности.
+- [ ] В [Data Safety Policy](DATA_SAFETY_POLICY.md) найдена применимая нормативная
+  граница записи, чтения, identity или currentness.
+- [ ] Неподдерживаемые capability flags сохраняются выключенными, пока поддержка не
+  одобрена и не реализована отдельно.
+- [ ] В изменение не смешаны несвязанный cleanup, benchmark work и продуктовые
+  изменения.
+- [ ] Публичный результат не зависит от приватного пути, локальной среды или
+  непереносимого пользовательского предположения.
+
+## 3. Storage, identity and currentness
+
+- [ ] Source repository остаётся read-only входом: продукт не изменяет worktree,
+  live Git storage или target code и не выполняет код целевого проекта.
+- [ ] Тесты и ручная проверка, способные менять state, используют отдельный
+  `PROJECT_KB_HOME` и безопасный тестовый repository, а не реальные registration и
+  managed storage пользователя.
+- [ ] Canonical project identity и registry binding через PRIMARY workspace,
+  repository identity и binding generation остаются явно связанными и проверяемыми.
+- [ ] Canonical snapshot проходит capture, validation и sealing до атомарной
+  публикации; generation/lifecycle ownership не обходится, а managed generations
+  остаются отдельными create-once artifacts.
+- [ ] Структурная читаемость snapshot не используется как доказательство currentness:
+  availability и currentness проверяются раздельно.
+- [ ] `STALE` и `UNVERIFIED` не представляются как `CURRENT`; `CURRENT` относится только
+  к моменту подтверждённого `verified_at`.
+- [ ] Реализованная cross-snapshot lineage внутреннего lifecycle сохраняет согласованные
+  task ownership, parent links, generation sequence и pointers и не выдаётся за
+  публичную CLI/MCP capability.
+- [ ] Secrets, локальные абсолютные пути и несвязанные repository data не попадают в
+  durable или публичные artifacts.
+
+Нормативные детали этих инвариантов принадлежат
+[Data Safety Policy](DATA_SAFETY_POLICY.md), а не этому checklist.
+
+## 4. CLI and MCP surfaces
+
+### CLI
+
+- [ ] Упаковка по-прежнему устанавливает `pkb`, `project-kb` и `pkb-mcp`; изменение
+  любого entrypoint сверено с `pyproject.toml`, source и focused tests.
+- [ ] При изменении CLI проверены `uv run pkb --help`,
+  `uv run project-kb --help`, help изменённой команды и её source/test contract.
+- [ ] `symbols`, `imports` и `inspect` остаются bounded structural queries, отличными
+  от неподдерживаемого generic/semantic search; internal lifecycle не получает
+  неявную публичную команду.
+- [ ] Вывод `capabilities` и availability соответствует реализации: `search`,
+  `exports`, `context_packs`, `can_search`, `can_generate_exports` и
+  `can_generate_context` остаются выключенными.
+
+### MCP
+
+- [ ] `pkb-mcp` остаётся persistent `stdio` entrypoint и требует полный
+  operator-pinned identity contract: path, project ID, snapshot ID, SHA-256 и source
+  commit; неполная или противоречивая конфигурация закрывает startup.
+- [ ] MCP обслуживает ровно закреплённый snapshot и не выбирает другой artifact,
+  `latest` generation или live registry state.
+- [ ] Структурные data queries открывают SQLite через `mode=ro`, `immutable=1` и
+  `query_only`; transport не публикует snapshots и не меняет pointers или currentness.
+- [ ] Tool annotations и фактическое поведение остаются read-only и structural;
+  изменение inventory требует синхронного обновления Architecture, README и focused
+  MCP tests.
+
+## 5. Validation gates
+
+- [ ] Требование Python `>=3.14`, зависимости в `pyproject.toml` и `uv.lock` согласованы;
+  при изменении зависимостей выполнены `uv lock --check` и `uv sync --locked`.
+- [ ] Запущены focused tests ответственности, затронутой изменением, без подмены
+  реального контракта чрезмерными mocks или fixtures.
+- [ ] Полный текущий test suite проходит командой `uv run pytest`.
+- [ ] Формат и lint проходят командами `uv run ruff format --check .` и
+  `uv run ruff check .`.
+- [ ] При изменении entrypoints, CLI или MCP дополнительно проверены help, installed
+  scripts и соответствующие CLI/MCP contract tests, включая `pkb-mcp`.
+- [ ] Любая state-changing проверка использует изолированное managed storage; source
+  repository и реальный Project KB home остаются неизменными.
+- [ ] Default validation не выполняет live network/provider calls и не запускает
+  исторические benchmark experiments.
+- [ ] Выполнены `git diff --check`, просмотр точного diff и итоговая проверка
+  `git status` на незаявленный scope.
+
+## 6. Documentation and publication
+
+- [ ] При изменении публичного поведения или контракта обновлён его canonical owning
+  document.
+- [ ] README остаётся кратким positioning/navigation документом и не дублирует
+  техническое руководство.
+- [ ] [Architecture](ARCHITECTURE.md) остаётся владельцем текущих components, flows и
+  ownership boundaries.
+- [ ] [Data Safety Policy](DATA_SAFETY_POLICY.md) остаётся владельцем нормативных
+  write/read, identity и currentness invariants.
+- [ ] [Benchmark Methodology](BENCHMARK.md) владеет методикой,
+  [Experiments and Results](EXPERIMENTS_AND_RESULTS.md) — измерениями и errata, а
+  [Development History](DEVELOPMENT_HISTORY.md) — curated historical lineage.
+- [ ] Публичные документы не содержат служебные пути автоматизации, локальные
+  абсолютные пути, secrets, приватные значения среды или preservation locations.
+- [ ] Все добавленные и затронутые публичные ссылки разрешаются в существующие файлы
+  или проверенные внешние цели.
+- [ ] Frozen portfolio/reference positioning остаётся точным, а неподдерживаемые
+  search, export, context и public lifecycle capabilities не рекламируются.
+- [ ] Official release или license readiness заявляется только после появления
+  соответствующих metadata, license и подтверждённой public hygiene.
+
+## 7. Historical experiment boundary
+
+- [ ] Canonical historical evaluation не переписана и не заменена задним числом.
+- [ ] Diagnostics и errata остаются явно отделены от canonical results и не называются
+  новой официальной evaluation.
+- [ ] Benchmark runs не входят в обычную contributor/product validation.
+- [ ] Документация не утверждает существование formal N5 или G3: N5 не была завершена,
+  а G3 не создавался.
+- [ ] Остановленная expansion остаётся остановленной, пока отдельно не одобрена новая
+  experimental generation.
+- [ ] Исторические наблюдения остаются ограниченными конкретными tasks и environment;
+  current product acceptance не выводится из одной score table.
+
+Подробные границы принадлежат [Benchmark Methodology](BENCHMARK.md) и
+[Experiments and Results](EXPERIMENTS_AND_RESULTS.md); score arrays и методика здесь не
+повторяются.
+
+## 8. Before commit or publication
+
+- [ ] Просмотрен точный diff и подтверждён заявленный file scope.
+- [ ] В commit или publication не смешаны несвязанные staged, unstaged или untracked
+  files.
+- [ ] Все применимые focused и default tests, lint и contract checks завершились
+  успешно.
+- [ ] `git diff --check` завершился без whitespace errors или merge markers.
+- [ ] Публичные документы и ссылки соответствуют фактическому product state.
+- [ ] В diff нет secrets, локальных путей, приватных values или служебных artifacts.
+- [ ] Capability, availability и currentness claims не сильнее доступного evidence.
+- [ ] Любое расширение product scope имеет отдельное явное решение и не скрыто внутри
+  maintenance change.
+- [ ] До заявления official release подтверждены license, publication metadata и
+  public hygiene.
