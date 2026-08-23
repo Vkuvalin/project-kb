@@ -791,8 +791,7 @@ def test_same_root_relink_during_verification_never_returns_current(
     assert status.project_state == "SNAPSHOT_REBUILD_REQUIRED"
     assert status.availability.can_use_snapshot is False
     assert {
-        name: getattr(status.availability, name)
-        for name in UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
+        name: getattr(status.availability, name) for name in UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
     } == UNIMPLEMENTED_PUBLIC_FEATURE_FLAGS
     assert after.project_state == "SNAPSHOT_REBUILD_REQUIRED"
     assert after.availability.can_use_snapshot is False
