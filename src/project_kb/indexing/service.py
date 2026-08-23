@@ -101,6 +101,9 @@ class IndexService:
         )
         repo_root = Path(project.repo_root)
         storage_path = Path(project.storage_path)
+        # IndexService владеет публикацией канонического kb.sqlite. Lifecycle использует
+        # тот же нейтральный механизм capture, но публикует отдельные управляемые
+        # поколения и не подменяет канонический контур публикации.
         current_path = storage_path / "kb.sqlite"
         previous_snapshot = current_path.exists()
         attempts = tuple(

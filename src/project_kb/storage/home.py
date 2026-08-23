@@ -183,6 +183,8 @@ def create_project_storage(storage_path: Path) -> dict[str, str]:
     try:
         _reject_redirected_storage_path(storage_path)
         storage_path.mkdir(parents=True, exist_ok=True)
+        # exports/ — часть схемы хранения, а не признак поддержки генерации выгрузок.
+        # Доступность функции задаёт resolver/status; can_generate_exports сейчас False.
         exports_path = storage_path / "exports"
         runs_path = storage_path / "runs"
         _reject_redirected_storage_path(exports_path)
