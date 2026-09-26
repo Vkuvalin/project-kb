@@ -1,8 +1,4 @@
 # Private Codex
-AGENTS.md
-.agents/
-.codex/
-docs/codex/
 
 # Python
 __pycache__/
@@ -18,8 +14,6 @@ build/
 *.egg-info/
 
 # Env / secrets
-.env
-.env.*
 *.pem
 *.key
 *.pfx
@@ -37,7 +31,26 @@ id_ed25519
 .project-kb/
 
 # IDE
-.idea/
 
 # Local review artifacts
 *.diff
+
+# BEGIN MANAGED UNIVERSAL IGNORE RULES
+# Centrally synchronized universal privacy/safety rules.
+# Do not add stack-specific or project-specific patterns to this block.
+
+# Universal secrets
+.env
+.env.*
+!.env.example
+
+# Local IDE
+.idea/
+
+# Agent workflow infrastructure
+docs/codex/
+.agents/
+.codex/
+AGENTS.md
+
+# END MANAGED UNIVERSAL IGNORE RULES
