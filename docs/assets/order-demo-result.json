@@ -1,0 +1,195 @@
+{
+  "register": "PROJECT_REGISTERED",
+  "index": "INDEX_PUBLISHED",
+  "symbols": [
+    {
+      "relative_path": "shop/models.py",
+      "qualified_name": "shop.models.Order",
+      "start_line": 6,
+      "end_line": 11
+    },
+    {
+      "relative_path": "shop/services.py",
+      "qualified_name": "shop.services.OrderService",
+      "start_line": 5,
+      "end_line": 10
+    }
+  ],
+  "imports": [
+    {
+      "relative_path": "shop/services.py",
+      "module_text": "shop.models",
+      "imported_name": "Order",
+      "resolution_status": "EXACT",
+      "resolved_relative_path": "shop/models.py"
+    }
+  ],
+  "inspection": {
+    "file": {
+      "relative_path": "shop/services.py",
+      "line_count": 10,
+      "parse_status": "SUCCESS"
+    },
+    "symbols": [
+      {
+        "qualified_name": "shop.services",
+        "symbol_kind": "MODULE",
+        "start_line": 1,
+        "end_line": 10
+      },
+      {
+        "qualified_name": "shop.services.OrderService",
+        "symbol_kind": "CLASS",
+        "start_line": 5,
+        "end_line": 10
+      },
+      {
+        "qualified_name": "shop.services.OrderService.create",
+        "symbol_kind": "METHOD",
+        "start_line": 6,
+        "end_line": 7
+      },
+      {
+        "qualified_name": "shop.services.OrderService.describe",
+        "symbol_kind": "METHOD",
+        "start_line": 9,
+        "end_line": 10
+      }
+    ],
+    "imports": [
+      {
+        "module_text": "shop.models",
+        "imported_name": "Order",
+        "resolution_status": "EXACT",
+        "resolved_relative_path": "shop/models.py"
+      }
+    ],
+    "diagnostics": 0
+  },
+  "mcp_requests": {
+    "get_snapshot_metadata": {},
+    "find_symbols": {
+      "names": [
+        "Order",
+        "OrderService"
+      ],
+      "match": "exact",
+      "symbol_kinds": [
+        "CLASS"
+      ],
+      "projection": [
+        "relative_path",
+        "short_name",
+        "symbol_kind",
+        "start_line",
+        "end_line"
+      ]
+    },
+    "query_structural_records": {
+      "dataset": "files",
+      "projection": [
+        "relative_path",
+        "line_count",
+        "parse_status"
+      ]
+    },
+    "inspect_paths": {
+      "paths": [
+        "shop/models.py",
+        "shop/services.py"
+      ],
+      "include": [
+        "file",
+        "symbols",
+        "imports",
+        "diagnostics"
+      ]
+    }
+  },
+  "mcp": {
+    "tools": [
+      "find_symbols",
+      "get_snapshot_metadata",
+      "inspect_paths",
+      "query_structural_records"
+    ],
+    "metadata": {
+      "schema_version": 2,
+      "build_status": "SEALED"
+    },
+    "files": [
+      {
+        "line_count": 1,
+        "parse_status": "SUCCESS",
+        "relative_path": "shop/__init__.py"
+      },
+      {
+        "line_count": 12,
+        "parse_status": "SUCCESS",
+        "relative_path": "shop/app.py"
+      },
+      {
+        "line_count": 11,
+        "parse_status": "SUCCESS",
+        "relative_path": "shop/models.py"
+      },
+      {
+        "line_count": 10,
+        "parse_status": "SUCCESS",
+        "relative_path": "shop/services.py"
+      }
+    ],
+    "classes": [
+      {
+        "end_line": 11,
+        "relative_path": "shop/models.py",
+        "short_name": "Order",
+        "start_line": 6,
+        "symbol_kind": "CLASS"
+      },
+      {
+        "end_line": 10,
+        "relative_path": "shop/services.py",
+        "short_name": "OrderService",
+        "start_line": 5,
+        "symbol_kind": "CLASS"
+      }
+    ],
+    "inspected_paths": [
+      {
+        "relative_path": "shop/models.py",
+        "found": true
+      },
+      {
+        "relative_path": "shop/services.py",
+        "found": true
+      }
+    ],
+    "currentness_before": "CURRENT",
+    "currentness_after": "STALE",
+    "changed_paths": [
+      "shop/models.py"
+    ],
+    "same_pinned_snapshot": true,
+    "after_change_request": {
+      "names": [
+        "Order",
+        "OrderService",
+        "ExpressOrder"
+      ],
+      "match": "exact",
+      "symbol_kinds": [
+        "CLASS"
+      ],
+      "projection": [
+        "relative_path",
+        "short_name",
+        "symbol_kind",
+        "start_line",
+        "end_line"
+      ]
+    },
+    "old_snapshot_still_readable": true,
+    "new_class_in_old_snapshot": false
+  }
+}
