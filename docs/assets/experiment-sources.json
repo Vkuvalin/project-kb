@@ -61,11 +61,161 @@
   ],
   "g2": {
     "data": "g2-metrics.csv",
-    "source_type": "published_initial_n3_medians",
+    "source_type": "published_initial_n3_medians_verified_against_primary_events",
     "contract": "benchmark/g2/contracts/e4b_structural_replicated_g2_experiment.json",
     "replicates_per_task_condition": 3,
     "cells": 18,
     "task_binding": "SHA-256 файлов A1/A4 проверены по task_asset_sha256 в контракте G2; это те же вопросы и исходный коммит, что в E4A.",
-    "score_note": "Исходное оценивание и диагностика идентификаторов показаны раздельно в EXPERIMENTS_AND_RESULTS.md. Новое оценивание не проводилось."
+    "score_note": "Исходное оценивание и диагностика идентификаторов показаны раздельно в EXPERIMENTS_AND_RESULTS.md. Новое оценивание не проводилось.",
+    "run_telemetry_data": "g2-run-telemetry.csv",
+    "telemetry_definitions": {
+      "tokens": "input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens из единственного turn.completed.usage каждого запуска; проверены по raw.telemetry.tokens.",
+      "tool_attempts": "Количество уникальных item.id с item.completed и item.type command_execution/mcp_tool_call; включает failed и declined. Подготовительные проверки агента входят, внешняя orchestration не входит. Не число shell-подкоманд, поисков или раундов.",
+      "tool_failures": "Количество терминальных failed/declined; сверено с raw.telemetry.tool_failures. Подмножество tool_attempts.",
+      "aggregation": "Медианы каждой метрики отдельно по трём повторам. Повторно суммировать cached/reasoning с input/output не нужно."
+    },
+    "telemetry_evidence": [
+      {
+        "run_id": "e4b-g2-audit-1v2-hybrid-mcp-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-hybrid-mcp-r1.raw.json",
+        "raw_sha256": "b4aa805de7e4f948f0f95248f2e99db7ab4ec17ec4441c44dbf15a1ae15e5344",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-hybrid-mcp-r1.events.jsonl",
+        "events_sha256": "cc894b05a95c325282f022a9b1029de409cdbc329ae6f1b250cdfa1bb86b619e"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-hybrid-mcp-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-hybrid-mcp-r2.raw.json",
+        "raw_sha256": "08d4eaad87885142f5aa5ea94eb559c4b5de6d0989b41c0318fce331a6932fcb",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-hybrid-mcp-r2.events.jsonl",
+        "events_sha256": "c00c9f494a6e3da59a08b0b29ce37ecebcd1d523f0e4ad6c2d99e3f7db5bbb37"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-hybrid-mcp-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-hybrid-mcp-r3.raw.json",
+        "raw_sha256": "ab2c1421d2c5cdd0554b9424f3c56810b138ed84b07805ffc91ce6634b405c91",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-hybrid-mcp-r3.events.jsonl",
+        "events_sha256": "626e45b91d678717140cc3bc249cae6c0fcea63e367c37df9674f00297a2332e"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pkb-mcp-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pkb-mcp-r1.raw.json",
+        "raw_sha256": "59abd945329b434442fb4486780c69e17b0847b78fd9f7af3b7dd4a5bb47462f",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pkb-mcp-r1.events.jsonl",
+        "events_sha256": "6a48c962c4dbecc4c8352d7b2c5a51199213805ce28f07f05614859939b3d793"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pkb-mcp-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pkb-mcp-r2.raw.json",
+        "raw_sha256": "63d47a9bc5c8cba6de50d69d3ad947928784cb33f0174c880ebb1bc7a5ef85b9",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pkb-mcp-r2.events.jsonl",
+        "events_sha256": "27bfb309bcff2f3328dcc9d5850a4dd850f5b5170ad4ecc38f239428c85974a5"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pkb-mcp-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pkb-mcp-r3.raw.json",
+        "raw_sha256": "1be22c9ff15fd6920d6fbbe7e8c208708cdad42a6d5bb2ba8c6c75e259b45f65",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pkb-mcp-r3.events.jsonl",
+        "events_sha256": "0c98c9b12c0afb07177344d18ce9ec640877c588d47ce105a3269fd6016d326d"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pycharm-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pycharm-r1.raw.json",
+        "raw_sha256": "fcb5316c27a945995f4366c4b7724714b26da3574044aee3fc0be6534cf1c192",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pycharm-r1.events.jsonl",
+        "events_sha256": "b5c4b2ed5f37954aa19bf95a978f37bd84aa089a6a9cedc3f7a9f88d47a3f3ff"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pycharm-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pycharm-r2.raw.json",
+        "raw_sha256": "94dbb3f3f78753ffc43025abcf0e25ee961a6a969e0568e8e16e6435cb6f0cf7",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pycharm-r2.events.jsonl",
+        "events_sha256": "95feb00f07fed753d9b80e6f21edad354a8dd19c4ace061a8b1c3388b1ab0cfe"
+      },
+      {
+        "run_id": "e4b-g2-audit-1v2-pycharm-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-1v2-pycharm-r3.raw.json",
+        "raw_sha256": "b2d1d0ad7ae04d540a9a003436ac91238fd00f49aa4baa989bd4a76bb953926d",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-1v2-pycharm-r3.events.jsonl",
+        "events_sha256": "97f15ee75b068b30214992a0de14a484b4c380422bb5a3a279759a6d59f81e7e"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-hybrid-mcp-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-hybrid-mcp-r1.raw.json",
+        "raw_sha256": "13e3c9de7b7ea9ea9007d53c972ea74155f0dc47e8df1dea12f6bc57ea6b51f5",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-hybrid-mcp-r1.events.jsonl",
+        "events_sha256": "929f22b0b9a11cb27446d9f5f1c9440e1fdc3fae096aaacc369d4e2c023ab848"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-hybrid-mcp-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-hybrid-mcp-r2.raw.json",
+        "raw_sha256": "88d100fcde96b337478bdeb2ee14d7281a9815784f85e0479ab954829b805698",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-hybrid-mcp-r2.events.jsonl",
+        "events_sha256": "3bd646ab933c2bce78854983ac6f43d5c46b47b37834871c1e623fc32323488a"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-hybrid-mcp-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-hybrid-mcp-r3.raw.json",
+        "raw_sha256": "8d894f5794314419f6809cf27631522f842f39a9dadd47ba7a37f2acc9057fb1",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-hybrid-mcp-r3.events.jsonl",
+        "events_sha256": "9057a62b857644dacc3699576b5bcb074aafc229e5500dfe000052f2275f791e"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pkb-mcp-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pkb-mcp-r1.raw.json",
+        "raw_sha256": "4e6dd3faa9f0628763f60f78002afa54510e42766459726266c616012da42baa",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pkb-mcp-r1.events.jsonl",
+        "events_sha256": "970d96a032975a8c6e0b32dece35c96d7a8dd368739a4feef84fbbd261218b15"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pkb-mcp-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pkb-mcp-r2.raw.json",
+        "raw_sha256": "8959dfd987c8dd007ca2bd5fad32823baa44cd2e81bb263e9cb80a31e729e3a0",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pkb-mcp-r2.events.jsonl",
+        "events_sha256": "71dc8af886c701fbac9b17432bc0e354091ae4a7c4b06491d9184b40565b303a"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pkb-mcp-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pkb-mcp-r3.raw.json",
+        "raw_sha256": "8e8bf30a97695382fca020f6e00ebae14eb08fa607f5fdcd16705cf6cae82c2a",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pkb-mcp-r3.events.jsonl",
+        "events_sha256": "bd8fac89e4be00376e02af75289ba67a1f3e524562679663a3f938be661bbc5b"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pycharm-r1",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pycharm-r1.raw.json",
+        "raw_sha256": "1f0ddc9a7e75db829d79a1c8d34aad74ea8c07cca20df45705971c1146d48a2c",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pycharm-r1.events.jsonl",
+        "events_sha256": "730a381a036fb0da285bc043cb083fd23014e9d1301dd7546b60283169165731"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pycharm-r2",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pycharm-r2.raw.json",
+        "raw_sha256": "cea9bca5798803a76dd79e839a7661ae0865512678261a7368d66462ef890957",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pycharm-r2.events.jsonl",
+        "events_sha256": "69f05443affd790831b55070a37ec54aa94938314566a2805559c9945c2a69b5"
+      },
+      {
+        "run_id": "e4b-g2-audit-4v2-pycharm-r3",
+        "raw": "benchmark/g2/initial-n3/raw/e4b-g2-audit-4v2-pycharm-r3.raw.json",
+        "raw_sha256": "2c8883e84545818a96de321baa40e1d1267b9495acb2ee85d913914f206a3502",
+        "events": "benchmark/g2/initial-n3/events/e4b-g2-audit-4v2-pycharm-r3.events.jsonl",
+        "events_sha256": "36b904b73ad336412bc59095d78ea590b1b05ef556a025f8b5349cc8081e79d0"
+      }
+    ]
+  },
+  "early_operational": {
+    "source_type": "historical_summary",
+    "source_document": "exports_chats_26-10-2026/chat_6.txt",
+    "source_lines": "56-63",
+    "task_id": "B2",
+    "search_calls": {
+      "native": 13,
+      "pkb": 5
+    },
+    "repo_content_files_read": {
+      "native": 8,
+      "pkb": 5
+    },
+    "note": "Поисковые вызовы и прочитанные файлы — отдельные метрики, не полный tool-call counter."
   }
 }

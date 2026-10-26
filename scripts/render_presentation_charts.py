@@ -52,7 +52,7 @@ def render(metric: str, filename: str, title: str, unit: str) -> None:
         for index, value in enumerate(values):
             label = (
                 f"{int(value):,}".replace(",", " ")
-                if metric == "median_input_tokens"
+                if metric in ("median_input_tokens", "median_tool_attempts")
                 else f"{value:.1f}".replace(".", ",")
             )
             ax.text(
@@ -69,7 +69,12 @@ def render(metric: str, filename: str, title: str, unit: str) -> None:
     fig.text(
         0.07,
         0.045,
-        "G2 · медианы 3 повторов на режим и задачу · 18 запусков всего",
+        "G2 · медианы 3 повторов на режим и задачу · 18 запусков всего"
+        + (
+            "\nПопытки вызова инструментов, включая ошибки и отклонения"
+            if metric == "median_tool_attempts"
+            else ""
+        ),
         fontsize=10,
         color="#475569",
         linespacing=1.5,
@@ -234,4 +239,11 @@ if __name__ == "__main__":
         "g2-input-tokens.png",
         "Входные токены двух задач",
         "Медиана, входные токены",
+    )
+
+    render(
+        "median_tool_attempts",
+        "g2-tool-attempts.png",
+        "Обращения к инструментам в двух задачах",
+        "Медиана, попытки вызова",
     )
