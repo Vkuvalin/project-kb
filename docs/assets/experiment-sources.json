@@ -1,0 +1,71 @@
+{
+  "description": "Происхождение восстановленных данных Project KB. Публикуются выбранные метрики и оригиналы заданий; первичные архивы сохраняются отдельно.",
+  "early_structural": {
+    "data": "early-structural-metrics.csv",
+    "source_type": "historical_summary",
+    "source_documents": [
+      "exports_chats_26-10-2026/chat_1.txt",
+      "exports_chats_26-10-2026/chat_2.txt"
+    ],
+    "note": "Две сводки описывают один набор опытов. A1R — повторение A1; это не четыре повтора одной задачи. Время — сохранённая продолжительность работы агента.",
+    "native_total_seconds": 934,
+    "pkb_total_seconds": 626,
+    "time_reduction_percent": 32.97644539614561,
+    "raw_timing_traces_in_public_set": false
+  },
+  "e4a": {
+    "data": "e4a-metrics.csv",
+    "source_type": "final_evaluation",
+    "source_package": "2026-08-21-public-freeze",
+    "evaluation_artifact": "benchmark/e4a/results/evaluation/E4A_FINAL_EVALUATION.json",
+    "evaluation_sha256": "fbf40a6a48ee011de58d5f3c2d67d0791ff0d88fba0145a6b74f154e1ceaa5a5",
+    "source_project": "antique-attribution-ai",
+    "source_commit": "443a7a42478a09ad6a61a364b6ea817e44cb97ca",
+    "source_tree": "1eb670160e5cb4d67f27938f2dad789454f76da2",
+    "pkb_runtime_commit": "7d18cb212f34aa41a84dca11d4a12341a47e6eef",
+    "snapshot_id": "7bbbf66b0fcc4f689b2233da022251a4",
+    "snapshot_sha256": "2580204f783e02c681a28b6ea9ac9c7cb59ed8d1c2ef1b2593a56b08f26704f9",
+    "timing_metric": "controller_elapsed_wall_seconds",
+    "cells": 12,
+    "replicates_per_task_condition": 1,
+    "valid_cells": 12,
+    "correctness_max": 10
+  },
+  "tasks": [
+    {
+      "id": "AUDIT_1V2",
+      "file": "benchmark-tasks/AUDIT_1V2.md",
+      "sha256": "693fd46fddcafe9ad7aa5210a12a1160ccbbeac98084f0656ad1294a510c4c5a",
+      "used_by": [
+        "E4A",
+        "G2"
+      ]
+    },
+    {
+      "id": "AUDIT_2",
+      "file": "benchmark-tasks/AUDIT_2.md",
+      "sha256": "ce3266820d4782acfc6b2458fed6113138e48a6fcef93e326098578f77e15924",
+      "used_by": [
+        "E4A"
+      ]
+    },
+    {
+      "id": "AUDIT_4V2",
+      "file": "benchmark-tasks/AUDIT_4V2.md",
+      "sha256": "339cdd97fe53f8da9cdef9cd81ffa3c0b821adb49125fe49fe1253092c3752ff",
+      "used_by": [
+        "E4A",
+        "G2"
+      ]
+    }
+  ],
+  "g2": {
+    "data": "g2-metrics.csv",
+    "source_type": "published_initial_n3_medians",
+    "contract": "benchmark/g2/contracts/e4b_structural_replicated_g2_experiment.json",
+    "replicates_per_task_condition": 3,
+    "cells": 18,
+    "task_binding": "SHA-256 файлов A1/A4 проверены по task_asset_sha256 в контракте G2; это те же вопросы и исходный коммит, что в E4A.",
+    "score_note": "Исходное оценивание и диагностика идентификаторов показаны раздельно в EXPERIMENTS_AND_RESULTS.md. Новое оценивание не проводилось."
+  }
+}

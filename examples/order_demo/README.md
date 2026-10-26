@@ -17,6 +17,17 @@ uv run python examples/order_demo/run_demo.py
 - `query_structural_records` с `dataset="files"` — список файлов для показа структуры;
 - `inspect_paths` — данные нескольких файлов за один вызов.
 
+| Шаг | Вызов | Ключевой результат |
+| --- | --- | --- |
+| Подключение | `register order-demo <repo>` | `PROJECT_REGISTERED` |
+| Построение карты | `index order-demo --full` | `INDEX_PUBLISHED` |
+| Проверка | `status order-demo --verify strong` | `CURRENT` до изменения, `STALE` после |
+| Поиск | `symbols order-demo --name OrderService` | `shop/services.py`, строки 5–10 |
+| Зависимости | `imports order-demo --file shop/services.py` | `Order` из `shop.models` → `shop/models.py` |
+| Карточка файла | `inspect order-demo --file shop/services.py` | Класс, два метода, один импорт, 0 ошибок разбора |
+
+Это шаги, которые выполняет сценарий; вручную повторять регистрацию внутри уже подготовленного демо не требуется. `SUCCESS` в результате разбора означает успешное извлечение структуры Python, `EXACT` — однозначное разрешение импорта в файл проекта.
+
 Отдельной CLI-команды `pkb tree` нет: структура примера выводится из записей MCP. Индексирование читает Python как исходный текст и не выполняет код магазина.
 
 В конце программа добавляет `ExpressOrder` только во временный `shop/models.py`. Проверка strong меняется с `CURRENT` на `STALE`, а тот же MCP-сеанс продолжает читать прежний закреплённый снимок: нового класса в нём нет. Читаемость снимка не означает актуальности рабочего дерева; MCP не заменяет strong-проверку.

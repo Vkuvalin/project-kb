@@ -1,0 +1,13 @@
+generation,task_id,condition,elapsed_seconds,correctness_points,correctness_max,valid,critical_failures,evidence_kind
+E4A,AUDIT_1V2,NATIVE,211.6707016,10,10,true,0,final_evaluation
+E4A,AUDIT_1V2,PYCHARM,268.767741,10,10,true,0,final_evaluation
+E4A,AUDIT_1V2,PKB,167.3546866,10,10,true,0,final_evaluation
+E4A,AUDIT_1V2,HYBRID,208.2861694,10,10,true,0,final_evaluation
+E4A,AUDIT_2,NATIVE,337.86583,10,10,true,0,final_evaluation
+E4A,AUDIT_2,PYCHARM,299.0462948,10,10,true,0,final_evaluation
+E4A,AUDIT_2,PKB,344.6457121,10,10,true,0,final_evaluation
+E4A,AUDIT_2,HYBRID,320.0874886,10,10,true,0,final_evaluation
+E4A,AUDIT_4V2,NATIVE,696.6277169,10,10,true,0,final_evaluation
+E4A,AUDIT_4V2,PYCHARM,544.6286104,10,10,true,0,final_evaluation
+E4A,AUDIT_4V2,PKB,849.0374681,10,10,true,0,final_evaluation
+E4A,AUDIT_4V2,HYBRID,531.8015399,10,10,true,0,final_evaluation

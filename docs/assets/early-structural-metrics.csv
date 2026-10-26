@@ -1,0 +1,9 @@
+generation,task_id,condition,elapsed_seconds,correctness_points,correctness_max,evidence_kind
+STAGE7_STRUCTURAL,A1,NATIVE,147,10,10,historical_summary
+STAGE7_STRUCTURAL,A1,PKB,90,10,10,historical_summary
+STAGE7_STRUCTURAL,A1R,NATIVE,195,10,10,historical_summary
+STAGE7_STRUCTURAL,A1R,PKB,75,10,10,historical_summary
+STAGE7_STRUCTURAL,A2,NATIVE,230,10,10,historical_summary
+STAGE7_STRUCTURAL,A2,PKB,201,10,10,historical_summary
+STAGE7_STRUCTURAL,A4,NATIVE,362,10,10,historical_summary
+STAGE7_STRUCTURAL,A4,PKB,260,10,10,historical_summary
