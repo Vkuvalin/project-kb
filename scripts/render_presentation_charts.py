@@ -1,4 +1,4 @@
-"""Render presentation charts from saved historical pairs and G2 medians.
+"""Render charts from saved historical pairs, E4A results and G2 medians.
 
 From the repository root:
     uv run --no-project --with matplotlib python scripts/render_presentation_charts.py
@@ -161,9 +161,73 @@ def render_early() -> None:
     plt.close(fig)
 
 
+def render_e4a() -> None:
+    """Render all twelve E4A observations on the same time scale."""
+    with (ASSETS / "e4a-metrics.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    tasks = ("AUDIT_1V2", "AUDIT_2", "AUDIT_4V2")
+    titles = (
+        "Карточка класса\nAUDIT_1V2",
+        "Три класса\nAUDIT_2",
+        "Поиск по репозиторию\nAUDIT_4V2",
+    )
+    policies = ("NATIVE", "PYCHARM", "PKB", "HYBRID")
+    labels = ("Native", "PyCharm", "Project KB", "Совместно")
+    colors = ("#94a3b8", "#64748b", "#2563eb", "#0f766e")
+    values = {(row["task_id"], row["condition"]): float(row["elapsed_seconds"]) for row in rows}
+    maximum = max(values.values())
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5.7), sharex=True, sharey=True)
+    for ax, task, title in zip(axes, tasks, titles, strict=True):
+        measured = [values[(task, policy)] for policy in policies]
+        ax.barh(range(4), measured, height=0.58, color=colors, zorder=3)
+        ax.set_yticks(range(4), labels, fontsize=13)
+        ax.set_title(title, fontsize=15, fontweight="bold", loc="left", pad=18)
+        ax.set_xlim(0, maximum * 1.22)
+        ax.grid(axis="x", color="#e2e8f0", zorder=0)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="both", length=0, labelsize=12, labelcolor="#334155")
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color("#cbd5e1")
+        for index, value in enumerate(measured):
+            ax.text(
+                value + maximum * 0.025,
+                index,
+                f"{value:.1f}".replace(".", ","),
+                va="center",
+                fontsize=13,
+                fontweight="bold",
+                color="#0f172a",
+            )
+    axes[0].invert_yaxis()
+    fig.suptitle(
+        "E4A · время выполнения трёх задач",
+        x=0.06,
+        y=0.98,
+        ha="left",
+        fontsize=20,
+        fontweight="bold",
+        color="#0f172a",
+    )
+    fig.supxlabel("Время выполнения, секунды · единая шкала", y=0.18, fontsize=13)
+    fig.text(
+        0.06,
+        0.045,
+        "По 1 запуску на режим и задачу · все 12 ответов получили 10/10",
+        fontsize=12,
+        color="#475569",
+    )
+    fig.subplots_adjust(left=0.13, right=0.97, bottom=0.29, top=0.70, wspace=0.25)
+    fig.savefig(
+        ASSETS / "e4a-time.png", dpi=180, facecolor="white", bbox_inches="tight", pad_inches=0.2
+    )
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     ASSETS.mkdir(parents=True, exist_ok=True)
     render_early()
+    render_e4a()
     render("median_seconds", "g2-time.png", "Время выполнения двух задач", "Медиана, секунды")
     render(
         "median_input_tokens",

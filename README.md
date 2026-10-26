@@ -84,7 +84,7 @@ uv run pkb --help
 ```
 
 <details>
-<summary>Справка CLI: команды и пояснения на русском</summary>
+<summary>Справка CLI: команды</summary>
 
 ![Команды Project KB в PowerShell](docs/assets/cli-help.png)
 
